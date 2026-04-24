@@ -1,0 +1,15 @@
+{
+  "name": "worm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal localhost chat UI inspired by modern AI chat surfaces",
+  "main": "server/worm.js",
+  "scripts": {
+    "start": "node server/worm.js"
+  },
+  "dependencies": {
+    "axios": "^1.11.0",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2"
+  }
+}

@@ -1,0 +1,795 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>worm</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #ffffff;
+      --sidebar-bg: #f9f9f9;
+      --line: rgba(0,0,0,0.07);
+      --line-md: rgba(0,0,0,0.10);
+      --text: #0d0d0d;
+      --text-2: #5a5a5a;
+      --text-3: #aaa;
+      --accent: #0052ff;
+      --accent-soft: rgba(0,82,255,0.05);
+      --accent-glow: rgba(0,82,255,0.14);
+      --user-bg: #f2f2f2;
+      --panel: #ffffff;
+      --panel-soft: #fafafa;
+      --hover: rgba(0,0,0,0.04);
+      --hover-strong: rgba(0,0,0,0.06);
+      --shadow: rgba(0,0,0,0.10);
+      --shadow-soft: rgba(0,0,0,0.06);
+      --composer-fade-start: rgba(255,255,255,0);
+      --composer-fade-mid: rgba(255,255,255,0.96);
+      --composer-fade-end: #ffffff;
+      --r: 7px;
+      --t: 0.14s ease;
+    }
+    body.theme-night {
+      --bg: #0f1115;
+      --sidebar-bg: #15181e;
+      --line: rgba(255,255,255,0.08);
+      --line-md: rgba(255,255,255,0.13);
+      --text: #f3f5f7;
+      --text-2: #c0c6d0;
+      --text-3: #7f8794;
+      --accent: #4d8dff;
+      --accent-soft: rgba(77,141,255,0.12);
+      --accent-glow: rgba(77,141,255,0.22);
+      --user-bg: #242935;
+      --panel: #181c23;
+      --panel-soft: #11141a;
+      --reasoning-bg: #171c26;
+      --reasoning-border: rgba(125,164,255,0.24);
+      --hover: rgba(255,255,255,0.055);
+      --hover-strong: rgba(255,255,255,0.08);
+      --shadow: rgba(0,0,0,0.42);
+      --shadow-soft: rgba(0,0,0,0.28);
+      --composer-fade-start: rgba(15,17,21,0);
+      --composer-fade-mid: rgba(15,17,21,0.94);
+      --composer-fade-end: #0f1115;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: 'Source Sans 3', system-ui, -apple-system, sans-serif;
+      font-weight: 400;
+      font-size: 15px;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+      line-height: 1;
+    }
+    button, input, textarea, select { font: inherit; }
+
+    /* â”€â”€ Layout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .app {
+      display: grid;
+      grid-template-columns: 196px 1fr;
+      height: 100vh;
+      overflow: hidden;
+      transition: grid-template-columns var(--t);
+    }
+    body.sidebar-collapsed .app { grid-template-columns: 52px 1fr; }
+
+    /* â”€â”€ Sidebar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .sidebar {
+      background: var(--sidebar-bg);
+      border-right: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      transition: width var(--t);
+    }
+
+    .sidebar-head {
+      padding: 14px 10px 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border-bottom: 1px solid var(--line);
+      min-height: 48px;
+    }
+
+    .wordmark {
+      flex: 1;
+      font-family: 'JetBrains Mono', 'Courier New', monospace;
+      font-weight: 600;
+      font-size: 10px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--text);
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    .icon-btn {
+      width: 28px; height: 28px;
+      border: none; background: transparent;
+      color: var(--text-3);
+      border-radius: 5px;
+      display: grid; place-items: center;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: color var(--t), background var(--t);
+    }
+    .icon-btn:hover { color: var(--text); background: var(--hover); }
+    .icon-btn svg { width: 15px; height: 15px; }
+
+    .sidebar-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .sidebar-body::-webkit-scrollbar { width: 3px; }
+    .sidebar-body::-webkit-scrollbar-thumb { background: var(--line-md); border-radius: 2px; }
+    .sidebar-footer {
+      border-top: 1px solid var(--line);
+      padding: 10px 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .surface-label {
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      padding: 0 3px;
+    }
+    .surface-toggle {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 5px;
+      padding: 4px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+    .surface-btn {
+      border: 0;
+      background: transparent;
+      color: var(--text-2);
+      border-radius: 7px;
+      padding: 9px 8px;
+      text-align: left;
+      cursor: pointer;
+      transition: background var(--t), color var(--t), box-shadow var(--t);
+      font: inherit;
+    }
+    .surface-btn strong {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: inherit;
+    }
+    .surface-btn.active {
+      background: var(--accent);
+      color: #fff;
+      box-shadow: 0 8px 20px rgba(0,82,255,0.16);
+    }
+
+    .sec-label {
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      padding: 10px 6px 5px;
+    }
+
+    .new-btn {
+      width: 100%;
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 10px;
+      border: 1px dashed var(--line-md);
+      border-radius: var(--r);
+      background: transparent;
+      color: var(--text-3);
+      cursor: pointer;
+      font-size: 12px;
+      transition: border-color var(--t), color var(--t), background var(--t);
+      text-align: left;
+      margin-bottom: 4px;
+    }
+    .new-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+    .new-btn .ni { font-size: 15px; line-height: 1; }
+
+    .chat-item {
+      position: relative;
+      padding: 7px 10px;
+      border-radius: var(--r);
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: background var(--t), border-color var(--t);
+      overflow: hidden;
+    }
+    .chat-item:hover { background: var(--hover); }
+    .chat-item.active {
+      background: var(--panel);
+      border-color: var(--line);
+    }
+    .chat-item.active::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 20%; bottom: 20%;
+      width: 2px;
+      background: var(--accent);
+      border-radius: 0 2px 2px 0;
+    }
+    .chat-item { display: flex; align-items: center; gap: 4px; }
+    .chat-info { flex: 1; overflow: hidden; }
+    .chat-t { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chat-p { font-size: 11px; color: var(--text-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chat-menu-btn {
+      width: 20px; height: 20px; flex-shrink: 0;
+      border: none; background: transparent; color: var(--text-3);
+      border-radius: 4px; display: grid; place-items: center; cursor: pointer;
+      opacity: 0; transition: opacity var(--t), color var(--t), background var(--t);
+    }
+    .chat-item:hover .chat-menu-btn,
+    .chat-item.menu-open .chat-menu-btn { opacity: 1; }
+    .chat-menu-btn:hover { color: var(--text); background: var(--hover-strong); }
+    /* Dropdown */
+    .chat-dropdown {
+      position: fixed;
+      background: var(--panel);
+      border: 1px solid var(--line-md);
+      border-radius: 10px;
+      box-shadow: 0 8px 28px var(--shadow), 0 2px 8px var(--shadow-soft);
+      padding: 4px;
+      z-index: 300;
+      min-width: 148px;
+    }
+    .dd-item {
+      display: flex; align-items: center; gap: 9px;
+      padding: 8px 11px; border-radius: 7px; cursor: pointer;
+      font-size: 13px; color: var(--text);
+      transition: background var(--t);
+    }
+    .dd-item:hover { background: var(--hover); }
+    .dd-item.danger { color: #ef4444; }
+    .dd-item.danger:hover { background: rgba(239,68,68,0.05); }
+
+    /* Status pill â€” fixed top-right */
+    .status-pill {
+      position: fixed;
+      top: 14px; right: 16px;
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; color: var(--text-3);
+      z-index: 50;
+      pointer-events: none;
+    }
+    .selection-toast {
+      position: fixed;
+      right: 16px;
+      top: 42px;
+      max-width: 320px;
+      padding: 10px 12px;
+      border: 1px solid var(--line-md);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--panel) 94%, transparent);
+      box-shadow: 0 12px 32px var(--shadow-soft);
+      color: var(--text-2);
+      font-size: 12px;
+      line-height: 1.45;
+      opacity: 0;
+      transform: translateY(-6px);
+      pointer-events: none;
+      transition: opacity 0.18s ease, transform 0.18s ease;
+      z-index: 60;
+    }
+    .selection-toast.open { opacity: 1; transform: translateY(0); }
+    body.sidebar-collapsed .hide-when-collapsed { display: none !important; }
+    body.sidebar-collapsed .sidebar-head { justify-content: center; }
+    body.sidebar-collapsed .new-btn { justify-content: center; padding: 7px; }
+    body.sidebar-collapsed .sidebar-footer { display: none; }
+    /* Collapsed chat items: show only avatar */
+    .chat-avatar {
+      width: 30px; height: 30px; flex-shrink: 0;
+      border-radius: 6px;
+      background: var(--hover);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 600; color: var(--text-2);
+      text-transform: uppercase; letter-spacing: 0;
+      transition: background var(--t), color var(--t);
+    }
+    .chat-item.active .chat-avatar { background: var(--accent-soft); color: var(--accent); }
+    body.sidebar-collapsed .chat-item { justify-content: center; padding: 5px 4px; overflow: visible; }
+    body.sidebar-collapsed .chat-item.active::before { display: none; }
+    body.sidebar-collapsed .chat-item.active { background: var(--accent-soft); border-color: transparent; }
+    body.sidebar-collapsed .chat-info { display: none; }
+    body.sidebar-collapsed .chat-menu-btn { display: none; }
+    body.sidebar-collapsed .chat-avatar { display: flex; }
+
+    /* â”€â”€ Main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .main { display: flex; flex-direction: column; min-height: 0; overflow: hidden; background: var(--bg); }
+
+    .topbar {
+      height: 44px;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 16px;
+      flex-shrink: 0;
+      background: var(--bg);
+    }
+    .topbar-l { display: flex; align-items: center; gap: 10px; }
+    .topbar-r { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-3); }
+
+    /* Desktop: hide topbar, show only on mobile */
+    @media (min-width: 781px) { .topbar { display: none; } }
+
+    /* Sidebar footer for status */
+    .sidebar-footer {
+      padding: 10px 12px;
+      border-top: 1px solid var(--line);
+      display: flex; flex-direction: column; align-items: stretch; gap: 7px;
+      font-size: 11px; color: var(--text-3);
+    }
+
+    .status-dot {
+      width: 5px; height: 5px; border-radius: 50%;
+      background: #22c55e;
+      box-shadow: 0 0 0 2px rgba(34,197,94,0.22);
+      transition: background var(--t), box-shadow var(--t);
+    }
+    .status-dot.err { background: #ef4444; box-shadow: 0 0 0 2px rgba(239,68,68,0.2); }
+    .status-dot.idle { background: var(--text-3); box-shadow: none; }
+
+    .ws-label { font-size: 12px; font-weight: 500; color: var(--text-2); letter-spacing: 0.01em; }
+
+    /* â”€â”€ Messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .msgs-scroll {
+      flex: 1; overflow-y: auto; padding: 28px 0 240px;
+      scroll-behavior: smooth;
+    }
+    .msgs-scroll::-webkit-scrollbar { width: 4px; }
+    .msgs-scroll::-webkit-scrollbar-thumb { background: var(--line-md); border-radius: 2px; }
+
+    .reasoning-block { margin-bottom: 18px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,0.025); }
+    body.theme-night .reasoning-block {
+      background: var(--reasoning-bg);
+      border-color: var(--reasoning-border);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 10px 30px rgba(0,0,0,0.16);
+    }
+    body.theme-night .reasoning-label { color: #8fb2ff; }
+    .reasoning-label { font-size: 11px; font-weight: 600; color: var(--text-3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .reasoning-text { font-size: 13px; line-height: 1.58; color: var(--text-2); white-space: pre-wrap; }
+    .answer-block { white-space: normal; line-height: 1.58; padding-top: 2px; }
+    .answer-block.empty { color: var(--text-3); font-style: italic; }
+    .answer-source {
+      margin-top: 10px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--text-3);
+    }
+    .answer-meta {
+      margin-top: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--text-3);
+    }
+    .answer-source,
+    .answer-time {
+      color: var(--text-3);
+    }
+    .answer-meta .answer-source,
+    .answer-meta .answer-time {
+      margin-top: 0;
+    }
+    .answer-meta-sep {
+      color: var(--line-md);
+    }
+
+    .msgs-inner {
+      max-width: 700px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+
+    .msg { display: flex; flex-direction: column; }
+
+    .msg-who {
+      font-size: 9px; font-weight: 500; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--text-3);
+      margin-bottom: 6px;
+    }
+    .msg.user .msg-who { display: none; }
+    .msg.user { align-items: flex-end; }
+    .msg-meta {
+      font-size: 11px;
+      color: var(--text-3);
+      margin-bottom: 8px;
+      letter-spacing: 0.01em;
+    }
+
+    .msg-body {
+      font-size: 15px; line-height: 1.72;
+    }
+
+    .msg.user .msg-body {
+      background: var(--user-bg);
+      border-radius: var(--r);
+      padding: 9px 13px;
+      max-width: 460px;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .msg.assistant .msg-body {
+      color: var(--text);
+      white-space: normal;
+      word-break: break-word;
+    }
+
+    /* Markdown */
+    .msg-body p { margin: 0 0 10px; }
+    .msg-body p:last-child { margin-bottom: 0; }
+    .answer-block p { margin: 0 0 8px; }
+    .answer-block p:last-child { margin-bottom: 0; }
+    .answer-block h1,.answer-block h2,.answer-block h3 { margin: 12px 0 5px; }
+    .answer-block ul,.answer-block ol { margin: 5px 0 8px; }
+    .answer-block li { margin-bottom: 3px; }
+    .msg-body h1,.msg-body h2,.msg-body h3 { margin: 14px 0 5px; font-weight: 600; line-height: 1.35; }
+    .msg-body h1 { font-size: 1.12em; }
+    .msg-body h2 { font-size: 1.02em; }
+    .msg-body h3 { font-size: 0.88em; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-2); }
+    .msg-body ul,.msg-body ol { padding-left: 1.35em; margin: 6px 0; }
+    .msg-body li { margin-bottom: 4px; }
+    .msg-body strong { font-weight: 600; }
+    .msg-body em { font-style: italic; color: var(--text-2); }
+    .msg-body del { text-decoration: line-through; color: var(--text-3); }
+
+    .inline-code {
+      font-family: 'JetBrains Mono', Consolas, monospace;
+      font-size: 0.83em;
+      background: var(--accent-soft);
+      color: var(--accent);
+      padding: 1px 5px; border-radius: 4px;
+      border: 1px solid rgba(0,82,255,0.1);
+    }
+
+    .code-block {
+      background: var(--panel-soft);
+      border: 1px solid var(--line-md);
+      border-radius: var(--r);
+      overflow: hidden; margin: 10px 0;
+    }
+    .code-lang {
+      font-size: 9px; font-family: 'JetBrains Mono', monospace;
+      letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--text-3); padding: 7px 12px 5px;
+      border-bottom: 1px solid var(--line);
+    }
+    .code-block code {
+      display: block;
+      font-family: 'JetBrains Mono', Consolas, monospace;
+      font-size: 12.5px; line-height: 1.62;
+      padding: 10px 12px; white-space: pre; overflow-x: auto;
+      color: var(--text); background: none;
+    }
+
+    /* Thinking */
+    .thinking {
+      display: inline-flex; align-items: center; gap: 4px;
+      color: var(--text-3); font-size: 12px;
+    }
+    .td {
+      width: 4px; height: 4px; border-radius: 50%;
+      background: var(--accent); opacity: 0.25;
+      animation: tp 1.4s infinite ease-in-out;
+    }
+    .td:nth-child(2) { animation-delay: 0.2s; }
+    .td:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes tp {
+      0%,80%,100% { opacity: 0.2; transform: scale(0.75); }
+      40% { opacity: 1; transform: scale(1); }
+    }
+
+    /* â”€â”€ Composer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .composer-dock {
+      position: fixed; bottom: 0; left: 196px; right: 0;
+      padding: 0 24px 22px;
+      background: linear-gradient(to bottom, var(--composer-fade-start) 0%, var(--composer-fade-mid) 32%, var(--composer-fade-end) 62%);
+      transition: left var(--t);
+    }
+    body.sidebar-collapsed .composer-dock { left: 52px; }
+
+    .composer-inner { max-width: 700px; margin: 0 auto; width: 100%; }
+
+    .composer-box {
+      background: var(--panel);
+      border: 1px solid var(--line-md);
+      border-radius: var(--r);
+      overflow: hidden;
+      transition: border-color var(--t), box-shadow var(--t);
+    }
+    .composer-box:focus-within {
+      border-color: rgba(0,82,255,0.35);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    /* Composer top: textarea + send button */
+    .composer-top {
+      display: flex; align-items: flex-end;
+      padding: 12px 12px 10px 14px; gap: 10px;
+    }
+    .composer-box textarea {
+      flex: 1; border: none; outline: none; resize: none;
+      background: transparent;
+      padding: 0;
+      min-height: 48px; max-height: 180px;
+      font-size: 15px; line-height: 1.62;
+      color: var(--text);
+    }
+    .composer-box textarea::placeholder { color: var(--text-3); }
+
+    /* Controls row */
+    .composer-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 7px 10px; border-top: 1px solid var(--line); gap: 6px;
+    }
+    .row-l,.row-r { display: flex; align-items: center; gap: 5px; }
+
+    .ctrl-sel {
+      height: 28px; padding: 0 8px;
+      border: 1px solid var(--line-md);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text-2);
+      font-size: 12px; cursor: pointer; outline: none;
+      transition: border-color var(--t);
+    }
+    .ctrl-sel:focus { border-color: rgba(0,82,255,0.4); }
+
+    .send-btn {
+      width: 34px; height: 34px; flex-shrink: 0;
+      border: none; border-radius: 8px;
+      background: var(--accent); color: #fff;
+      display: grid; place-items: center; cursor: pointer;
+      transition: opacity var(--t), transform var(--t);
+    }
+    .send-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+    .send-btn:active { transform: translateY(0) scale(0.96); }
+    .send-btn svg { width: 14px; height: 14px; }
+    .send-btn.stop { background: #ef4444; }
+    .send-btn.stop:hover { opacity: 1; background: #dc2626; transform: none; }
+    @keyframes stopPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.35); } 50% { box-shadow: 0 0 0 5px rgba(239,68,68,0); } }
+    .send-btn.stop { animation: stopPulse 1.2s infinite; }
+
+    /* â”€â”€ Modals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.18);
+      backdrop-filter: blur(3px);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 500;
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.15s ease;
+    }
+    .modal-overlay.open { opacity: 1; pointer-events: auto; }
+    .modal-box {
+      background: var(--panel);
+      border: 1px solid var(--line-md);
+      border-radius: 12px;
+      box-shadow: 0 20px 60px var(--shadow), 0 4px 16px var(--shadow-soft);
+      padding: 22px 22px 18px;
+      min-width: 300px; max-width: 400px; width: 90%;
+      transform: translateY(10px) scale(0.98);
+      transition: transform 0.15s ease;
+    }
+    .modal-overlay.open .modal-box { transform: translateY(0) scale(1); }
+    .modal-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+    .modal-msg { font-size: 13px; color: var(--text-2); margin-bottom: 20px; line-height: 1.5; }
+    .modal-note { font-size: 12px; color: var(--text-3); margin: -8px 0 16px; line-height: 1.4; }
+    .modal-input {
+      width: 100%; border: 1px solid var(--line-md); border-radius: var(--r);
+      padding: 8px 10px; font-size: 13px; outline: none; margin-bottom: 16px;
+      background: var(--panel);
+      color: var(--text);
+      transition: border-color var(--t), box-shadow var(--t);
+    }
+    .modal-input:focus { border-color: rgba(0,82,255,0.4); box-shadow: 0 0 0 3px var(--accent-glow); }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 7px; }
+    .modal-btn {
+      height: 30px; padding: 0 14px;
+      border: 1px solid var(--line-md); border-radius: 6px;
+      font-size: 12px; cursor: pointer; background: transparent; color: var(--text);
+      transition: background var(--t);
+    }
+    .modal-btn:hover { background: var(--hover); }
+    .modal-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .modal-btn.primary:hover { opacity: 0.88; }
+    .modal-btn.danger { background: #ef4444; border-color: #ef4444; color: #fff; }
+    .modal-btn.danger:hover { opacity: 0.88; }
+    .modal-status { font-size: 12px; color: var(--text-3); margin: -8px 0 16px; min-height: 16px; }
+    .loading-box { max-width: 320px; text-align: center; }
+    .loading-dots { justify-content: center; margin-top: 6px; }
+
+    /* â”€â”€ Mobile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    @media (max-width: 780px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { position: fixed; left:0; top:0; bottom:0; width:260px; z-index:30; transform:translateX(-100%); transition:transform 0.2s ease; }
+      body.sidebar-open .sidebar { transform:translateX(0); }
+      body.sidebar-collapsed .app { grid-template-columns: 1fr; }
+      .topbar { display: flex; }
+      .sidebar-footer { display: none; }
+      .composer-dock { left:0; padding:0 10px 14px; }
+      body.sidebar-collapsed .composer-dock { left:0; }
+      .composer-inner { max-width: 100%; }
+      .msgs-scroll { padding: 16px 0 180px; }
+      .msgs-inner { padding: 0 14px; max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Status pill: fixed top-right -->
+  <div class="status-pill">
+    <div class="status-dot idle" id="statusDot"></div>
+    <span id="healthText">connecting...</span>
+  </div>
+  <div class="selection-toast" id="selectionToast"></div>
+  <!-- Confirm modal -->
+  <div class="modal-overlay" id="confirmModal">
+    <div class="modal-box">
+      <div class="modal-title">Konfirmasi</div>
+      <div class="modal-msg" id="confirmMsg"></div>
+      <div class="modal-actions">
+        <button class="modal-btn" id="confirmCancel">Cancel</button>
+        <button class="modal-btn danger" id="confirmOk">Delete</button>
+      </div>
+    </div>
+  </div>
+  <!-- Prompt modal -->
+  <div class="modal-overlay" id="promptModal">
+    <div class="modal-box">
+      <div class="modal-title" id="promptTitle">Rename</div>
+      <input class="modal-input" id="promptInput" type="text" placeholder="Chat name...">
+      <div class="modal-actions">
+        <button class="modal-btn" id="promptCancel">Cancel</button>
+        <button class="modal-btn primary" id="promptOk">Save</button>
+      </div>
+    </div>
+  </div>
+  <!-- Session setup modal -->
+  <div class="modal-overlay" id="sessionSetupModal">
+    <div class="modal-box">
+      <div class="modal-title">New chat</div>
+      <div class="modal-msg">Pilih provider dan model sebelum chat baru dibuat.</div>
+      <div class="modal-note">Think level default: Medium</div>
+      <div class="modal-status" id="sessionSetupStatus"></div>
+      <select class="modal-input" id="sessionSetupProvider">
+        <option value="ollama" selected>Ollama</option>
+        <option value="nvidia">NVIDIA</option>
+      </select>
+      <select class="modal-input" id="sessionSetupModel">
+        <option value="">loading...</option>
+      </select>
+      <div class="modal-actions">
+        <button class="modal-btn" id="sessionSetupCancel">Cancel</button>
+        <button class="modal-btn primary" id="sessionSetupOk">OK</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal-overlay" id="loadingModal">
+    <div class="modal-box loading-box">
+      <div class="modal-title" id="loadingTitle">Connecting</div>
+      <div class="modal-msg" id="loadingMsg">Please wait...</div>
+      <div class="thinking loading-dots"><span class="td"></span><span class="td"></span><span class="td"></span></div>
+    </div>
+  </div>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <span class="wordmark hide-when-collapsed">worm</span>
+        <button class="icon-btn" id="collapseBtn" title="Toggle">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+            <line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="10" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/>
+          </svg>
+        </button>
+
+      </div>
+      <div class="sidebar-body">
+        <button class="new-btn hide-when-collapsed" id="newChatBtn" type="button">
+          <span class="ni">+</span>
+          <span>New chat</span>
+        </button>
+        <button class="new-btn icon-btn" id="newChatBtnCollapsed" type="button" title="New chat" style="display:none; width:32px; height:32px; border:1px dashed var(--line-md); border-radius:5px; margin-bottom:4px;">+</button>
+        <div class="sec-label hide-when-collapsed">Recent</div>
+        <div id="chatList"></div>
+      </div>
+      <div class="sidebar-footer hide-when-collapsed">
+        <div class="surface-label">Theme</div>
+        <div class="surface-toggle" id="themeToggle">
+          <button class="surface-btn active" id="themeLightBtn" type="button" data-theme="light">
+            <strong>Light Mode</strong>
+          </button>
+          <button class="surface-btn" id="themeNightBtn" type="button" data-theme="night">
+            <strong>Night Mode</strong>
+          </button>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+      <div class="topbar">
+        <div class="topbar-l">
+          <button class="icon-btn" id="mobileMenuBtn" title="Menu">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+              <line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/>
+            </svg>
+          </button>
+          <span class="ws-label" id="workspaceTitleSide">Home</span>
+        </div>
+      </div>
+
+      <div class="msgs-scroll" id="msgsScroll">
+        <div class="msgs-inner" id="messages"></div>
+      </div>
+
+      <div class="composer-dock">
+        <div class="composer-inner">
+          <div class="composer-box">
+            <div class="composer-top">
+              <textarea id="messageInput" placeholder="Message Worm..."></textarea>
+              <button class="send-btn" id="sendBtn" title="Send (Enter)">
+                <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="7" y1="12" x2="7" y2="2"/><polyline points="3,6 7,2 11,6"/>
+                </svg>
+              </button>
+            </div>
+            <div class="composer-row">
+              <div class="row-l">
+                <select class="ctrl-sel" id="surfaceModeSelect" title="Chat mode">
+                  <option value="local">Local Mode</option>
+                  <option value="deep_surf" selected>Deep Search Beta</option>
+                </select>
+                <select class="ctrl-sel" id="workspaceSelect" hidden>
+                  <option value="Home">Home</option>
+                  <option value="Telegram Bridge">Telegram</option>
+                  <option value="Local Shell">Shell</option>
+                </select>
+              </div>
+              <div class="row-r">
+                <select class="ctrl-sel" id="modeSelect">
+                  <option value="low">Low</option>
+                  <option value="medium" selected>Medium</option>
+                  <option value="high">High</option>
+                </select>
+                <select class="ctrl-sel" id="modelSelect"><option>loading...</option></select>
+                <select class="ctrl-sel" id="providerSelect">
+                  <option value="ollama" selected>Ollama</option>
+                  <option value="nvidia">NVIDIA</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
+
