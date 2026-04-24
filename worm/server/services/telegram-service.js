@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const https = require("https");
 const axios = require("axios");
 
 const {
@@ -22,6 +23,7 @@ const {
 } = require("../store/session-store");
 
 const TELEGRAM_INDEX_FILE = path.join(DATA_DIR, "..", "telegram-sessions.json");
+const telegramHttpsAgent = new https.Agent({ keepAlive: false });
 
 function telegramApiUrl(method) {
   return `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`;
@@ -94,6 +96,7 @@ function getTelegramSession(chatId) {
 async function telegramPost(method, data) {
   const res = await axios.post(telegramApiUrl(method), data, {
     timeout: 30000,
+    httpsAgent: telegramHttpsAgent,
     proxy: false
   });
   return res.data;

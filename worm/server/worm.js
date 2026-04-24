@@ -29,6 +29,14 @@ const {
 
 const app = express();
 
+process.on("warning", (warning) => {
+  if (warning?.name === "MaxListenersExceededWarning") {
+    console.warn(`[warning] ${warning.message}`);
+    return;
+  }
+  console.warn(warning);
+});
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(STATIC_DIR));
 
