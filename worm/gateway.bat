@@ -1,29 +1,53 @@
 @echo off
-cd /d %~dp0
-if not exist node_modules (
-  call npm.cmd install
-  if errorlevel 1 goto failed
+:: Re-launch in a persistent cmd /k window if not already inside one
+if not defined WORM_GATEWAY_RUNNING (
+  set WORM_GATEWAY_RUNNING=1
+  start "Worm Gateway" cmd /k ""%~f0""
+  exit
 )
+
+title Worm Gateway
+cd /d %~dp0
+
 if "%PORT%"=="" set PORT=3842
 
-netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul
-if not errorlevel 1 (
-  echo Worm already appears to be running on port %PORT%.
-  echo Opening http://localhost:%PORT% ...
-  start "" "http://localhost:%PORT%"
-  goto end
+echo ============================================================
+echo  Worm Gateway  ^|  Port %PORT%
+echo  Ctrl+C to stop  ^|  Close window to exit
+echo ============================================================
+echo.
+
+:: Install deps if missing
+if not exist node_modules (
+  echo [setup] Installing dependencies...
+  call npm.cmd install
+  if errorlevel 1 (
+    echo.
+    echo [ERROR] npm install failed. Check your Node.js installation.
+    echo.
+    goto end
+  )
+  echo.
 )
 
-call npm.cmd start
-if errorlevel 1 goto failed
-goto end
+:: Kill any existing process occupying the port
+for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr /R /C:":%PORT% .*LISTENING"') do (
+  echo [info] Killing old process on port %PORT% ^(PID %%p^)...
+  taskkill /PID %%p /F >nul 2>&1
+)
+timeout /t 1 /nobreak >nul
 
-:failed
+echo [start] Running: node server/worm.js
 echo.
-echo Worm gateway stopped.
-echo If you see EADDRINUSE, Worm is probably already running on port %PORT%.
-echo Open http://localhost:%PORT% or close the existing gateway before starting again.
+
+node server/worm.js
+
 echo.
-pause
+echo ============================================================
+echo  [Worm stopped]
+echo ============================================================
 
 :end
+echo.
+echo  Press any key to close this window...
+pause >nul

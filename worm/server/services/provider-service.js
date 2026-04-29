@@ -59,6 +59,29 @@ async function streamNvidiaChat({ model, messages, mode }) {
   });
 }
 
+async function completeNvidiaChat({ model, messages, mode, maxTokens = 256 }) {
+  const response = await axios({
+    method: "post",
+    url: `${NVIDIA_BASE_URL}/chat/completions`,
+    data: {
+      model,
+      stream: false,
+      messages,
+      temperature: mode === "high" ? 0.7 : mode === "medium" ? 0.5 : 0.2,
+      top_p: 0.9,
+      max_tokens: maxTokens,
+      response_format: { type: "json_object" }
+    },
+    timeout: 45000,
+    proxy: false,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${NVIDIA_API_KEY}`
+    }
+  });
+  return String(response.data?.choices?.[0]?.message?.content || "").trim();
+}
+
 async function streamOllamaChat({ model, messages, mode }) {
   return axios({
     method: "post",
@@ -79,7 +102,31 @@ async function streamOllamaChat({ model, messages, mode }) {
   });
 }
 
+async function completeOllamaChat({ model, messages, mode, maxTokens = 256 }) {
+  const response = await axios({
+    method: "post",
+    url: `${OLLAMA_BASE_URL}/api/chat`,
+    data: {
+      model,
+      stream: false,
+      format: "json",
+      messages,
+      options: {
+        temperature: mode === "high" ? 0.7 : mode === "medium" ? 0.5 : 0.2,
+        num_ctx: OLLAMA_CONTEXT_TOKENS,
+        num_predict: maxTokens
+      }
+    },
+    timeout: 45000,
+    proxy: false,
+    headers: { "Content-Type": "application/json" }
+  });
+  return String(response.data?.message?.content || "").trim();
+}
+
 module.exports = {
+  completeNvidiaChat,
+  completeOllamaChat,
   defaultModelFor,
   getProviderModels,
   getOllamaModels,

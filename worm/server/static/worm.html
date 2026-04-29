@@ -16,9 +16,11 @@
       --text: #0d0d0d;
       --text-2: #5a5a5a;
       --text-3: #aaa;
-      --accent: #0052ff;
-      --accent-soft: rgba(0,82,255,0.05);
-      --accent-glow: rgba(0,82,255,0.14);
+      --accent: #16a34a;
+      --accent-soft: rgba(22,163,74,0.08);
+      --accent-glow: rgba(22,163,74,0.18);
+      --accent-rgb: 22,163,74;
+      --accent-strong: #15803d;
       --user-bg: #f2f2f2;
       --panel: #ffffff;
       --panel-soft: #fafafa;
@@ -40,14 +42,16 @@
       --text: #f3f5f7;
       --text-2: #c0c6d0;
       --text-3: #7f8794;
-      --accent: #4d8dff;
-      --accent-soft: rgba(77,141,255,0.12);
-      --accent-glow: rgba(77,141,255,0.22);
+      --accent: #22c55e;
+      --accent-soft: rgba(34,197,94,0.14);
+      --accent-glow: rgba(34,197,94,0.24);
+      --accent-rgb: 34,197,94;
+      --accent-strong: #15803d;
       --user-bg: #242935;
       --panel: #181c23;
       --panel-soft: #11141a;
-      --reasoning-bg: #171c26;
-      --reasoning-border: rgba(125,164,255,0.24);
+      --reasoning-bg: linear-gradient(180deg, rgba(17,24,20,0.98), rgba(19,33,26,0.94));
+      --reasoning-border: rgba(34,197,94,0.28);
       --hover: rgba(255,255,255,0.055);
       --hover-strong: rgba(255,255,255,0.08);
       --shadow: rgba(0,0,0,0.42);
@@ -91,24 +95,28 @@
     }
 
     .sidebar-head {
-      padding: 14px 10px 10px;
-      display: flex;
+      padding: 16px 12px 12px;
+      display: grid;
+      grid-template-columns: 28px 1fr 28px;
       align-items: center;
       gap: 6px;
       border-bottom: 1px solid var(--line);
-      min-height: 48px;
+      min-height: 58px;
     }
 
     .wordmark {
-      flex: 1;
+      grid-column: 2;
+      justify-self: center;
+      text-align: center;
       font-family: 'JetBrains Mono', 'Courier New', monospace;
-      font-weight: 600;
-      font-size: 10px;
-      letter-spacing: 0.22em;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: 0.34em;
       text-transform: uppercase;
       color: var(--text);
       overflow: hidden;
       white-space: nowrap;
+      text-shadow: 0 0 18px rgba(var(--accent-rgb), 0.10);
     }
 
     .icon-btn {
@@ -121,6 +129,8 @@
       flex-shrink: 0;
       transition: color var(--t), background var(--t);
     }
+    .sidebar-head .icon-btn:first-child { grid-column: 1; }
+    .sidebar-head .icon-btn:last-child { grid-column: 3; justify-self: end; }
     .icon-btn:hover { color: var(--text); background: var(--hover); }
     .icon-btn svg { width: 15px; height: 15px; }
 
@@ -176,9 +186,9 @@
       color: inherit;
     }
     .surface-btn.active {
-      background: var(--accent);
+      background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, white), var(--accent-strong));
       color: #fff;
-      box-shadow: 0 8px 20px rgba(0,82,255,0.16);
+      box-shadow: 0 10px 24px rgba(var(--accent-rgb), 0.22);
     }
 
     .sec-label {
@@ -274,26 +284,33 @@
     }
     .selection-toast {
       position: fixed;
-      right: 16px;
-      top: 42px;
-      max-width: 320px;
-      padding: 10px 12px;
+      left: 50%;
+      top: 50%;
+      width: min(420px, calc(100vw - 28px));
+      padding: 12px 14px;
       border: 1px solid var(--line-md);
-      border-radius: 10px;
-      background: color-mix(in srgb, var(--panel) 94%, transparent);
-      box-shadow: 0 12px 32px var(--shadow-soft);
-      color: var(--text-2);
-      font-size: 12px;
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--panel) 88%, transparent);
+      box-shadow: 0 16px 40px var(--shadow), 0 8px 24px var(--shadow-soft);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
       line-height: 1.45;
+      text-align: center;
       opacity: 0;
-      transform: translateY(-6px);
+      transform: translate(-50%, calc(-50% + 10px)) scale(0.98);
       pointer-events: none;
       transition: opacity 0.18s ease, transform 0.18s ease;
-      z-index: 60;
+      z-index: 120;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
     }
-    .selection-toast.open { opacity: 1; transform: translateY(0); }
+    .selection-toast.open { opacity: 1; transform: translate(-50%, -50%) scale(1); }
     body.sidebar-collapsed .hide-when-collapsed { display: none !important; }
-    body.sidebar-collapsed .sidebar-head { justify-content: center; }
+    body.sidebar-collapsed .sidebar-head { grid-template-columns: 1fr; justify-items: center; }
+    body.sidebar-collapsed .sidebar-head .wordmark,
+    body.sidebar-collapsed .sidebar-head .icon-btn:first-child { display: none; }
+    body.sidebar-collapsed .sidebar-head .icon-btn:last-child { grid-column: 1; justify-self: center; }
     body.sidebar-collapsed .new-btn { justify-content: center; padding: 7px; }
     body.sidebar-collapsed .sidebar-footer { display: none; }
     /* Collapsed chat items: show only avatar */
@@ -324,8 +341,35 @@
       flex-shrink: 0;
       background: var(--bg);
     }
-    .topbar-l { display: flex; align-items: center; gap: 10px; }
+    .topbar-l { display: flex; align-items: center; gap: 10px; min-width: 0; }
     .topbar-r { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-3); }
+    .topbar-title {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text);
+      white-space: nowrap;
+    }
+    .topbar-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--panel) 86%, transparent);
+      border: 1px solid var(--line);
+      color: var(--text-2);
+      box-shadow: 0 8px 24px var(--shadow-soft);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      max-width: 48vw;
+    }
+    .topbar-status-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
     /* Desktop: hide topbar, show only on mobile */
     @media (min-width: 781px) { .topbar { display: none; } }
@@ -363,7 +407,7 @@
       border-color: var(--reasoning-border);
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 10px 30px rgba(0,0,0,0.16);
     }
-    body.theme-night .reasoning-label { color: #8fb2ff; }
+    body.theme-night .reasoning-label { color: #86efac; }
     .reasoning-label { font-size: 11px; font-weight: 600; color: var(--text-3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.08em; }
     .reasoning-text { font-size: 13px; line-height: 1.58; color: var(--text-2); white-space: pre-wrap; }
     .answer-block { white-space: normal; line-height: 1.58; padding-top: 2px; }
@@ -464,7 +508,7 @@
       background: var(--accent-soft);
       color: var(--accent);
       padding: 1px 5px; border-radius: 4px;
-      border: 1px solid rgba(0,82,255,0.1);
+      border: 1px solid rgba(var(--accent-rgb), 0.18);
     }
 
     .code-block {
@@ -513,29 +557,31 @@
     }
     body.sidebar-collapsed .composer-dock { left: 52px; }
 
-    .composer-inner { max-width: 700px; margin: 0 auto; width: 100%; }
+    .composer-inner { max-width: 700px; margin: 0 auto; width: 100%; position: relative; z-index: 40; }
 
     .composer-box {
       background: var(--panel);
       border: 1px solid var(--line-md);
       border-radius: var(--r);
-      overflow: hidden;
+      overflow: visible;
       transition: border-color var(--t), box-shadow var(--t);
+      position: relative;
+      z-index: 40;
     }
     .composer-box:focus-within {
-      border-color: rgba(0,82,255,0.35);
-      box-shadow: 0 0 0 3px var(--accent-glow);
+      border-color: rgba(var(--accent-rgb), 0.38);
+      box-shadow: 0 0 0 3px var(--accent-glow), 0 16px 36px rgba(var(--accent-rgb), 0.10);
     }
 
     /* Composer top: textarea + send button */
     .composer-top {
-      display: flex; align-items: flex-end;
+      display: flex; align-items: center;
       padding: 12px 12px 10px 14px; gap: 10px;
     }
     .composer-box textarea {
       flex: 1; border: none; outline: none; resize: none;
       background: transparent;
-      padding: 0;
+      padding: 6px 0;
       min-height: 48px; max-height: 180px;
       font-size: 15px; line-height: 1.62;
       color: var(--text);
@@ -548,6 +594,7 @@
       padding: 7px 10px; border-top: 1px solid var(--line); gap: 6px;
     }
     .row-l,.row-r { display: flex; align-items: center; gap: 5px; }
+    .row-r { margin-left: auto; position: relative; }
 
     .ctrl-sel {
       height: 28px; padding: 0 8px;
@@ -558,16 +605,136 @@
       font-size: 12px; cursor: pointer; outline: none;
       transition: border-color var(--t);
     }
-    .ctrl-sel:focus { border-color: rgba(0,82,255,0.4); }
+    .ctrl-sel:focus { border-color: rgba(var(--accent-rgb), 0.42); box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.08); }
+
+    .composer-settings {
+      position: relative;
+      display: flex;
+      justify-content: flex-end;
+      width: 100%;
+    }
+    .composer-settings-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      max-width: 220px;
+      height: 28px;
+      padding: 0 8px;
+      border: 1px solid var(--line-md);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text-2);
+      cursor: pointer;
+      box-shadow: none;
+      transition: border-color var(--t), background var(--t), transform var(--t), color var(--t);
+    }
+    .composer-settings-toggle:hover {
+      border-color: rgba(var(--accent-rgb), 0.24);
+      background: color-mix(in srgb, var(--panel) 92%, var(--accent-soft));
+      color: var(--text);
+      transform: translateY(-1px);
+    }
+    .composer-settings-toggle:focus-visible {
+      outline: none;
+      border-color: rgba(var(--accent-rgb), 0.42);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+    .composer-settings-label {
+      font-size: 9px;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      flex-shrink: 0;
+    }
+    .composer-settings-value {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 500;
+      color: inherit;
+    }
+    .composer-settings-caret {
+      width: 12px;
+      height: 12px;
+      flex-shrink: 0;
+      color: var(--text-3);
+      transition: transform var(--t), color var(--t);
+    }
+    .composer-settings.open .composer-settings-toggle {
+      border-color: rgba(var(--accent-rgb), 0.28);
+      background: color-mix(in srgb, var(--panel) 90%, var(--accent-soft));
+      color: var(--text);
+    }
+    .composer-settings.open .composer-settings-caret {
+      transform: rotate(180deg);
+      color: var(--accent);
+    }
+    .composer-settings-panel {
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 8px);
+      width: min(280px, calc(100vw - 32px));
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid rgba(var(--accent-rgb), 0.18);
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--panel) 96%, var(--accent-soft));
+      box-shadow: 0 28px 64px rgba(var(--accent-rgb), 0.16), 0 12px 30px var(--shadow-soft);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      z-index: 999;
+    }
+    .composer-settings-panel,
+    .composer-settings-panel .composer-settings-field,
+    .composer-settings-panel .composer-settings-field .ctrl-sel {
+      color: var(--text);
+    }
+    .composer-settings-panel .composer-settings-field {
+      color: var(--accent);
+    }
+    .composer-settings-panel .composer-settings-field .ctrl-sel {
+      background: color-mix(in srgb, var(--panel) 92%, transparent);
+      border-color: rgba(var(--accent-rgb), 0.18);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+    .composer-settings-panel .composer-settings-field .ctrl-sel:focus {
+      border-color: rgba(var(--accent-rgb), 0.42);
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12);
+    }
+    .composer-settings-panel[hidden] { display: none; }
+    .composer-settings-field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .composer-settings-field .ctrl-sel {
+      width: 100%;
+      height: 34px;
+      padding: 0 10px;
+      color: var(--text);
+      text-transform: none;
+      letter-spacing: 0;
+    }
 
     .send-btn {
-      width: 34px; height: 34px; flex-shrink: 0;
-      border: none; border-radius: 8px;
-      background: var(--accent); color: #fff;
+      width: 38px; height: 38px; flex-shrink: 0;
+      align-self: center;
+      border: none; border-radius: 10px;
+      background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 90%, white), var(--accent-strong)); color: #fff;
       display: grid; place-items: center; cursor: pointer;
-      transition: opacity var(--t), transform var(--t);
+      box-shadow: 0 10px 22px rgba(var(--accent-rgb), 0.24), inset 0 1px 0 rgba(255,255,255,0.22);
+      transition: opacity var(--t), transform var(--t), box-shadow var(--t);
     }
-    .send-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+    .send-btn:hover { opacity: 0.96; transform: translateY(-1px); box-shadow: 0 14px 28px rgba(var(--accent-rgb), 0.28), inset 0 1px 0 rgba(255,255,255,0.24); }
     .send-btn:active { transform: translateY(0) scale(0.96); }
     .send-btn svg { width: 14px; height: 14px; }
     .send-btn.stop { background: #ef4444; }
@@ -607,7 +774,7 @@
       color: var(--text);
       transition: border-color var(--t), box-shadow var(--t);
     }
-    .modal-input:focus { border-color: rgba(0,82,255,0.4); box-shadow: 0 0 0 3px var(--accent-glow); }
+    .modal-input:focus { border-color: rgba(var(--accent-rgb), 0.42); box-shadow: 0 0 0 3px var(--accent-glow); }
     .modal-actions { display: flex; justify-content: flex-end; gap: 7px; }
     .modal-btn {
       height: 30px; padding: 0 14px;
@@ -625,18 +792,132 @@
     .loading-dots { justify-content: center; margin-top: 6px; }
 
     /* â”€â”€ Mobile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .sidebar-scrim {
+      position: fixed;
+      inset: 0;
+      background: rgba(6, 10, 12, 0.32);
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s ease;
+      z-index: 25;
+    }
+    body.sidebar-open .sidebar-scrim { opacity: 1; pointer-events: auto; }
+
     @media (max-width: 780px) {
       .app { grid-template-columns: 1fr; }
-      .sidebar { position: fixed; left:0; top:0; bottom:0; width:260px; z-index:30; transform:translateX(-100%); transition:transform 0.2s ease; }
+      .sidebar {
+        position: fixed; left:0; top:0; bottom:0; width:280px; max-width: calc(100vw - 44px);
+        z-index:30; transform:translateX(-100%); transition:transform 0.2s ease;
+        box-shadow: 0 20px 48px rgba(0,0,0,0.26);
+      }
       body.sidebar-open .sidebar { transform:translateX(0); }
       body.sidebar-collapsed .app { grid-template-columns: 1fr; }
-      .topbar { display: flex; }
-      .sidebar-footer { display: none; }
-      .composer-dock { left:0; padding:0 10px 14px; }
+      .status-pill { display: none; }
+      .topbar {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        right: 10px;
+        height: 52px;
+        display: flex;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: color-mix(in srgb, var(--panel) 78%, transparent);
+        box-shadow: 0 16px 36px var(--shadow-soft);
+        backdrop-filter: blur(18px);
+        -webkit-backdrop-filter: blur(18px);
+        z-index: 20;
+      }
+      .topbar .icon-btn {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: transparent;
+        color: var(--text);
+      }
+      .topbar .icon-btn:hover { background: var(--accent-soft); color: var(--accent); }
+      .topbar-status {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        box-shadow: none;
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+        max-width: 42vw;
+      }
+      .sidebar-footer {
+        display: flex;
+        margin-top: auto;
+        padding-bottom: calc(12px + env(safe-area-inset-bottom));
+        background: var(--sidebar-bg);
+      }
+      .main { padding-top: 72px; }
+      .composer-dock {
+        left: 0;
+        right: 0;
+        padding: 0 10px calc(12px + env(safe-area-inset-bottom));
+      }
       body.sidebar-collapsed .composer-dock { left:0; }
       .composer-inner { max-width: 100%; }
-      .msgs-scroll { padding: 16px 0 180px; }
+      .composer-box {
+        border-radius: 16px;
+        box-shadow: 0 12px 30px var(--shadow-soft);
+      }
+      .composer-top {
+        padding: 12px 12px 8px 12px;
+        align-items: center;
+      }
+      .composer-box textarea {
+        min-height: 42px;
+        max-height: 120px;
+      }
+      .composer-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        align-items: center;
+        gap: 8px;
+      }
+      .row-l, .row-r {
+        width: 100%;
+        display: contents;
+      }
+      .row-l #surfaceModeSelect {
+        grid-column: 1;
+      }
+      .row-r .composer-settings {
+        grid-column: 2;
+      }
+      .row-l > #workspaceSelect {
+        display: none;
+      }
+      .row-r > #modeSelect,
+      .row-r > #providerSelect {
+        display: none;
+      }
+      .ctrl-sel {
+        width: 100%;
+        min-width: 0;
+      }
+      .composer-settings {
+        width: 100%;
+      }
+      .composer-settings-toggle {
+        width: 100%;
+        max-width: none;
+        justify-content: space-between;
+      }
+      .composer-settings-panel {
+        left: 0;
+        right: 0;
+        width: auto;
+        bottom: calc(100% + 10px);
+      }
+      .msgs-scroll { padding: 8px 0 250px; }
       .msgs-inner { padding: 0 14px; max-width: 100%; }
+      .ws-label { display: none; }
     }
   </style>
 </head>
@@ -647,6 +928,7 @@
     <span id="healthText">connecting...</span>
   </div>
   <div class="selection-toast" id="selectionToast"></div>
+  <div class="sidebar-scrim" id="sidebarScrim"></div>
   <!-- Confirm modal -->
   <div class="modal-overlay" id="confirmModal">
     <div class="modal-box">
@@ -740,7 +1022,14 @@
               <line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/>
             </svg>
           </button>
+          <span class="topbar-title">WORM</span>
           <span class="ws-label" id="workspaceTitleSide">Home</span>
+        </div>
+        <div class="topbar-r">
+          <div class="topbar-status">
+            <div class="status-dot idle" id="statusDotMobile"></div>
+            <span class="topbar-status-text" id="healthTextMobile">connecting...</span>
+          </div>
         </div>
       </div>
 
@@ -772,16 +1061,36 @@
                 </select>
               </div>
               <div class="row-r">
-                <select class="ctrl-sel" id="modeSelect">
-                  <option value="low">Low</option>
-                  <option value="medium" selected>Medium</option>
-                  <option value="high">High</option>
-                </select>
-                <select class="ctrl-sel" id="modelSelect"><option>loading...</option></select>
-                <select class="ctrl-sel" id="providerSelect">
-                  <option value="ollama" selected>Ollama</option>
-                  <option value="nvidia">NVIDIA</option>
-                </select>
+                <div class="composer-settings" id="composerSettings">
+                  <button class="composer-settings-toggle" id="composerSettingsToggle" type="button" aria-expanded="false" aria-controls="composerSettingsPanel" title="Model settings">
+                    <span class="composer-settings-label">Model</span>
+                    <span class="composer-settings-value" id="composerSettingsValue">loading...</span>
+                    <svg class="composer-settings-caret" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polyline points="3,5 7,9 11,5"></polyline>
+                    </svg>
+                  </button>
+                  <div class="composer-settings-panel" id="composerSettingsPanel" hidden>
+                    <label class="composer-settings-field">
+                      <span>Provider</span>
+                      <select class="ctrl-sel" id="providerSelect">
+                        <option value="ollama" selected>Ollama</option>
+                        <option value="nvidia">NVIDIA</option>
+                      </select>
+                    </label>
+                    <label class="composer-settings-field">
+                      <span>Model</span>
+                      <select class="ctrl-sel" id="modelSelect"><option>loading...</option></select>
+                    </label>
+                    <label class="composer-settings-field">
+                      <span>Thinking</span>
+                      <select class="ctrl-sel" id="modeSelect">
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

@@ -1,5 +1,27 @@
 const { buildCurrentTimeSystemLine, needsCurrentTimeTool, runCurrentTimeTool } = require("../tools/time-tool");
 const { classifyLiveIntent, needsWebLiveLookup, runWebLiveLookup } = require("../tools/web-live-tool");
+const {
+  defaultModelFor,
+  isProviderConfigured,
+  streamNvidiaChat,
+  streamOllamaChat
+} = require("./provider-service");
+
+const ORCHESTRATOR_CATEGORY_HINTS = [
+  "crypto_price",
+  "crypto_price_historical",
+  "gold_price",
+  "staple_price",
+  "forex_price",
+  "general_price",
+  "technology_news",
+  "sports_news",
+  "economy_news",
+  "general_news",
+  "office",
+  "person_relation",
+  "count"
+];
 
 function isAffirmativeFollowup(message = "") {
   const text = String(message || "").trim().toLowerCase();
@@ -121,7 +143,17 @@ function formatToolContext(results) {
 
   const lines = [
     "Fresh tool results for this turn:",
-    ...results.map((result) => `- [${result.name}] ${result.summary}`),
+    ...results.flatMap((result) => {
+      const engineBits = [];
+      if (Number.isFinite(result?.engine?.score)) engineBits.push(`score=${result.engine.score}`);
+      if (Array.isArray(result?.engine?.evidence) && result.engine.evidence.length) engineBits.push(`evidence=${result.engine.evidence.map((item) => `${item.sourceLabel}:${item.confidence}`).join(", ")}`);
+      const suffix = engineBits.length ? ` [${engineBits.join(" | ")}]` : "";
+      const blocks = [`- [${result.name}] ${result.summary}${suffix}`];
+      if (result?.contextText) {
+        blocks.push(`Context from ${result.name}:\n${String(result.contextText).trim()}`);
+      }
+      return blocks;
+    }),
     "Use these results when relevant. If a tool failed, mention the limitation briefly instead of inventing data."
   ];
 
@@ -157,13 +189,131 @@ function isPlainTimeRequest(message = "") {
 }
 
 function buildDirectToolReply(results) {
-  const directResults = results.filter((result) => result.directReply);
+  const directResults = results.filter((result) => result.directReply && !result.passToModel);
   if (!directResults.length) return "";
   const webLiveResult = directResults.find((result) => result.name === "web.live");
   if (webLiveResult) return webLiveResult.directReply;
   const timeResult = directResults.find((result) => result.name === "time.now");
   if (timeResult) return timeResult.directReply;
   return directResults[0].directReply;
+}
+
+function normalizeOrchestratorDecision(raw = {}) {
+  const mode = String(raw?.mode || "").trim().toLowerCase();
+  const tool = String(raw?.tool || "").trim().toLowerCase();
+  const categoryHint = String(raw?.categoryHint || "").trim().toLowerCase();
+  const confidence = Math.max(0, Math.min(1, Number(raw?.confidence || 0)));
+  const query = String(raw?.query || "").trim();
+
+  return {
+    mode: mode === "live" ? "live" : mode === "local" ? "local" : "",
+    tool: ["web.live", "time.now", "none"].includes(tool) ? tool : "",
+    categoryHint: ORCHESTRATOR_CATEGORY_HINTS.includes(categoryHint) ? categoryHint : "",
+    query,
+    confidence,
+    reason: String(raw?.reason || "").trim()
+  };
+}
+
+function shouldPromoteOrchestratorToLive(message, decision = null) {
+  if (!decision?.categoryHint || decision?.tool === "time.now") return false;
+  const text = String(message || "").toLowerCase();
+  return /\b(harga|price|berita|news|siapa|who|status|kurs|rate|berapa|terbaru|terkini|update|sekarang|hari ini)\b/.test(text);
+}
+
+async function runRoutingOrchestrator(message, options = {}) {
+  const provider = String(options.session?.provider || options.provider || "ollama").trim().toLowerCase();
+  const model = String(options.session?.model || options.model || defaultModelFor(provider)).trim();
+  if (!isProviderConfigured(provider)) return null;
+
+  const currentYear = new Date().getFullYear();
+  const system = [
+    "Route the user request for Worm. Return JSON only — no markdown, no explanation.",
+    `{"mode":"local|live","tool":"none|web.live|time.now","query":"optimized search query in user language (include year ${currentYear} for price/news queries)","categoryHint":"crypto_price|crypto_price_historical|gold_price|staple_price|forex_price|general_price|technology_news|sports_news|economy_news|general_news|office|person_relation|count","confidence":0.0,"reason":"short"}`,
+    "Current facts/prices/news/leaders/status => live + web.live.",
+    "Historical crypto price questions (e.g. bitcoin 3 days ago) => live + web.live, never time.now.",
+    "User includes a URL to read/check/summarize => live + web.live.",
+    "Time-only questions (jam, waktu, tanggal) => live + time.now.",
+    "Stable knowledge/math/language/chat => local + none, query can be empty.",
+    `For query field: write a clean, specific search query. Include '${currentYear}' for price/news. Use Indonesian if user speaks Indonesian.`,
+    "telur/cabai/bawang/beras/sembako/sayur => staple_price.",
+    "emas/antam/gold => gold_price.",
+    "btc/bitcoin/crypto => crypto_price."
+  ].join("\n");
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: String(message || "") }
+  ];
+
+  const raw = await new Promise(async (resolve, reject) => {
+    let streamResponse;
+    try {
+      streamResponse = provider === "nvidia"
+        ? await streamNvidiaChat({ model, messages, mode: "low" })
+        : await streamOllamaChat({ model, messages, mode: "low" });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const stream = streamResponse.data;
+    const isSse = provider === "nvidia";
+    let buffer = "";
+    let fullText = "";
+
+    const cleanup = () => {
+      stream.removeAllListeners("data");
+      stream.removeAllListeners("end");
+      stream.removeAllListeners("error");
+    };
+
+    stream.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const parts = isSse ? buffer.split("\n\n") : buffer.split("\n");
+      buffer = parts.pop() || "";
+
+      for (const part of parts) {
+        const line = isSse
+          ? part.split("\n").find((entry) => entry.startsWith("data: "))
+          : part.trim();
+        if (!line) continue;
+        const rawLine = isSse ? line.slice(6).trim() : line.trim();
+        if (!rawLine || rawLine === "[DONE]") continue;
+
+        try {
+          const parsed = JSON.parse(rawLine);
+          const token = isSse
+            ? parsed?.choices?.[0]?.delta?.content || ""
+            : parsed?.message?.content || "";
+          if (token) fullText += token;
+        } catch {
+          // ignore partial lines
+        }
+      }
+    });
+
+    stream.on("end", () => {
+      cleanup();
+      resolve(String(fullText || buffer || "").trim());
+    });
+
+    stream.on("error", (error) => {
+      cleanup();
+      reject(error);
+    });
+  });
+
+  try {
+    return normalizeOrchestratorDecision(JSON.parse(raw));
+  } catch {
+    const match = String(raw || "").match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    try {
+      return normalizeOrchestratorDecision(JSON.parse(match[0]));
+    } catch {
+      return null;
+    }
+  }
 }
 
 async function resolveToolContext(message, options = {}) {
@@ -175,23 +325,36 @@ async function resolveToolContext(message, options = {}) {
     ? getContextualOfficeFollowup(options.session, message)
     : null;
   const effectiveMessage = followup?.originalMessage || contextualOfficeFollowup?.originalMessage || message;
-  const tasks = [];
-  const directToolIntents = [];
-  const plainTimeRequest = isPlainTimeRequest(effectiveMessage);
-  const needsLiveWeb = needsWebLiveLookup(effectiveMessage) && !plainTimeRequest;
-  const shouldRunTimeTool = needsCurrentTimeTool(effectiveMessage) && (plainTimeRequest || !(surfaceMode === "deep_surf" && needsLiveWeb));
 
+  // --- PASS 1: LLM routing orchestrator (authoritative) ---
+  const orchestratorDecision = surfaceMode === "deep_surf"
+    ? await runRoutingOrchestrator(effectiveMessage, options).catch(() => null)
+    : null;
+
+  // LLM is authoritative; regex heuristics only as fallback when LLM unavailable
+  const orchestratorNeedsLiveWeb = orchestratorDecision
+    ? (orchestratorDecision.mode === "live" && orchestratorDecision.tool === "web.live")
+    : needsWebLiveLookup(effectiveMessage);
+  const orchestratorNeedsTime = orchestratorDecision
+    ? (orchestratorDecision.tool === "time.now")
+    : needsCurrentTimeTool(effectiveMessage);
+
+  // Always include current time alongside web search
+  const needsLiveWeb = orchestratorNeedsLiveWeb;
+  const shouldRunTimeTool = orchestratorNeedsTime || needsLiveWeb; // time always useful with web
+
+  // Block live web in local surface mode
   if (surfaceMode === "local" && needsLiveWeb) {
     return {
-      toolResults: [{
-        name: "web.live",
-        summary: "Live web lookup tersedia di Deep Search Beta.",
-        directReply: "Untuk data live seperti ini, pindah ke Deep Search Beta dulu ya."
-      }],
+      toolResults: [],
       toolContext: "",
       directReply: "Untuk data live seperti ini, pindah ke Deep Search Beta dulu ya."
     };
   }
+
+  // --- PASS 2: Execute tools in parallel ---
+  const tasks = [];
+  const directToolIntents = [];
 
   if (shouldRunTimeTool) {
     directToolIntents.push("time.now");
@@ -199,7 +362,13 @@ async function resolveToolContext(message, options = {}) {
   }
   if (surfaceMode === "deep_surf" && needsLiveWeb) {
     directToolIntents.push("web.live");
-    tasks.push(runWebLiveLookup(effectiveMessage, { secondHop: true, synthesisOnly: true }));
+    tasks.push(runWebLiveLookup(effectiveMessage, {
+      secondHop: true,
+      synthesisOnly: true,
+      forceLookup: orchestratorNeedsLiveWeb,
+      categoryHint: orchestratorDecision?.categoryHint || "",
+      overrideQuery: orchestratorDecision?.query || ""   // LLM-generated query
+    }));
   }
 
   const settled = await Promise.allSettled(tasks);
@@ -209,26 +378,16 @@ async function resolveToolContext(message, options = {}) {
     return {
       name: targetName,
       summary: `${friendlyToolLabel(targetName)} tidak tersedia untuk giliran ini.`,
-      directReply: targetName === "web.live" && surfaceMode === "deep_surf"
-        ? ""
-        : directToolIntents.includes(targetName)
-        ? friendlyToolFailureReply(targetName)
-        : ""
+      directReply: ""   // errors become toolContext, not bypassing LLM
     };
   });
 
-  const directReply = buildDirectToolReply(toolResults);
-  const adjustedDirectReply = surfaceMode === "deep_surf" && isRetryFollowup(message)
-    ? String(directReply || "").replace(
-      /^Saya sudah cek Google News search lanjutan/i,
-      "Saya sudah coba cek ulang Google News search lanjutan"
-    )
-    : directReply;
-
+  // All results go through LLM — no directReply bypass for tool results
   return {
     toolResults,
     toolContext: formatToolContext(toolResults),
-    directReply: adjustedDirectReply
+    directReply: "",
+    orchestratorDecision
   };
 }
 

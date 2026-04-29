@@ -106,7 +106,7 @@ function parseRelativeDateRequest(message, now = new Date()) {
   }
 
   const agoPatterns = [
-    /\b(\d+)\s+hari\s+yang\s+lalu\b/,
+    /\b(\d+)\s+hari\s+(?:yang\s+)?lalu\b/,
     /\b(\d+)\s+days?\s+ago\b/
   ];
   for (const pattern of agoPatterns) {
@@ -127,7 +127,7 @@ function parseRelativeDateRequest(message, now = new Date()) {
   }
 
   const weekAgoPatterns = [
-    /\b(\d+)\s+minggu\s+yang\s+lalu\b/,
+    /\b(\d+)\s+minggu\s+(?:yang\s+)?lalu\b/,
     /\b(\d+)\s+weeks?\s+ago\b/
   ];
   for (const pattern of weekAgoPatterns) {
@@ -184,6 +184,7 @@ function needsCurrentTimeTool(message) {
 
 module.exports = {
   buildCurrentTimeSystemLine,
+  parseRelativeDateRequest,
   runCurrentTimeTool,
   needsCurrentTimeTool
 };

@@ -1,11 +1,24 @@
 const axios = require("axios");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
 const {
   APP_LOCALE,
   COINGECKO_API_KEY,
   COINGECKO_SIMPLE_PRICE_URL,
   CRYPTO_RSS_URLS,
-  GOOGLE_NEWS_RSS_URL
+  GOOGLE_NEWS_RSS_URL,
+  JINA_API_KEY,
+  JINA_BASE_URL,
+  LIVE_RSS_SOURCE_REGISTRY,
+  LOGAM_MULIA_PRICE_URL,
+  PANEL_HARGA_PANGAN_URL,
+  PIHPS_CHART_URL,
+  PIHPS_PAGE_URL,
+  YAHOO_FINANCE_GOLD_URL
 } = require("../config");
+const { parseRelativeDateRequest } = require("./time-tool");
+
+const execFileAsync = promisify(execFile);
 
 const LIVE_TRIGGER_KEYWORDS_ID = [
   "terbaru",
@@ -61,6 +74,31 @@ const LIVE_MODE_TRIGGER_PHRASES = [
   "look it up"
 ];
 
+const DIRECT_URL_TRIGGER_PHRASES = [
+  ...LIVE_MODE_TRIGGER_PHRASES,
+  "cek",
+  "lihat",
+  "profil",
+  "profile",
+  "baca",
+  "ringkas",
+  "rangkum",
+  "resume",
+  "summarize",
+  "summary",
+  "analisa",
+  "analisis",
+  "review",
+  "inspect",
+  "open url",
+  "buka url",
+  "url ini",
+  "halaman ini",
+  "website ini",
+  "isi halaman",
+  "isi website"
+];
+
 const LIVE_TIME_TRIGGER_PHRASES = [
   "latest",
   "current",
@@ -91,6 +129,7 @@ const LIVE_DATA_KEYWORDS = [
   "marketcap",
   "volume",
   "news",
+  "berita",
   "headline",
   "weather",
   "cuaca",
@@ -388,6 +427,18 @@ function normalizeSearchText(message) {
     .replace(/\bamerika\b(?!\s+serikat)/gi, "amerika serikat");
 }
 
+function extractFirstUrl(message = "") {
+  const match = String(message || "").match(/https?:\/\/[^\s)]+/i);
+  return String(match?.[0] || "").trim();
+}
+
+function shouldFetchDirectUrl(message = "") {
+  const text = normalizeSearchText(message).toLowerCase();
+  const url = extractFirstUrl(message);
+  if (!url) return false;
+  return /^https?:\/\//i.test(String(message || "").trim()) || hasAnyPhrase(text, DIRECT_URL_TRIGGER_PHRASES);
+}
+
 function detectLiveIntent(message) {
   const text = normalizeSearchText(message).toLowerCase();
   if (!text) {
@@ -400,8 +451,8 @@ function detectLiveIntent(message) {
   const hasUrl = /https?:\/\//i.test(text);
   if (hasUrl) {
     return {
-      shouldLookup: false,
-      reason: "url"
+      shouldLookup: shouldFetchDirectUrl(message),
+      reason: shouldFetchDirectUrl(message) ? "direct_url" : "url"
     };
   }
 
@@ -419,11 +470,15 @@ function detectLiveIntent(message) {
   const hasCountIntent = hasAnyPhrase(text, LIVE_COUNT_KEYWORDS);
   const hasAdminEntity = hasAnyPhrase(text, LIVE_ADMIN_KEYWORDS);
   const hasStockIntent = isStockQuery(message);
+  const hasGoldIntent = isGoldQuery(message);
+  const hasHistoricalCryptoIntent = isHistoricalCryptoPriceQuery(message);
 
   const shouldLookup = Boolean(
-    hasModeTrigger
+    hasHistoricalCryptoIntent
+    || hasModeTrigger
     || hasLinkIntent
     || hasPriceIntent
+    || hasGoldIntent
     || hasStockIntent
     || hasOfficeIntent
     || hasPersonRelationIntent
@@ -451,7 +506,9 @@ function detectLiveIntent(message) {
       hasPersonRelationIntent,
       hasCountIntent,
       hasAdminEntity,
-      hasStockIntent
+      hasStockIntent,
+      hasGoldIntent,
+      hasHistoricalCryptoIntent
     }
   };
 }
@@ -463,6 +520,86 @@ function needsWebLiveLookup(message) {
 function isCryptoQuery(message) {
   const text = normalizeSearchText(message).toLowerCase();
   return /\b(bitcoin|ethereum|solana|bnb|xrp|doge|dogecoin|cardano|crypto|coin|btc|eth|ada)\b/.test(text);
+}
+
+function buildHistoricalDateContext(message, now = new Date()) {
+  const relative = parseRelativeDateRequest(message, now);
+  if (!relative || !Number.isFinite(relative.amount) || relative.amount >= 0) return null;
+
+  const baseDate = relative.baseDate || now;
+  const targetDate = new Date(baseDate.getTime() + relative.amount * 24 * 60 * 60 * 1000);
+  if (Number.isNaN(targetDate.getTime())) return null;
+
+  const idLabel = new Intl.DateTimeFormat("id-ID", {
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  }).format(targetDate);
+  const enLabel = new Intl.DateTimeFormat("en-US", {
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  }).format(targetDate);
+  const isoLabel = targetDate.toISOString().slice(0, 10);
+  const day = String(targetDate.getUTCDate()).padStart(2, "0");
+  const month = String(targetDate.getUTCMonth() + 1).padStart(2, "0");
+  const year = String(targetDate.getUTCFullYear());
+
+  return {
+    relative,
+    targetDate,
+    displayLabel: idLabel,
+    searchTerms: [...new Set([
+      idLabel,
+      enLabel,
+      isoLabel,
+      `${day}-${month}-${year}`,
+      `${month}/${day}/${year}`,
+      `${day}/${month}/${year}`
+    ])],
+    coingeckoDate: `${day}-${month}-${year}`
+  };
+}
+
+function isHistoricalCryptoPriceQuery(message) {
+  return isCryptoQuery(message) && Boolean(buildHistoricalDateContext(message));
+}
+
+function hasHistoricalDateMatch(text, message) {
+  const context = buildHistoricalDateContext(message);
+  if (!context) return true;
+  const haystack = normalizeSearchText(text).toLowerCase();
+  return context.searchTerms.some((term) => haystack.includes(normalizeSearchText(term).toLowerCase()));
+}
+
+function isGoldQuery(message) {
+  const text = normalizeSearchText(message).toLowerCase();
+  return /\b(emas|gold|xau|antam|logam mulia)\b/.test(text);
+}
+
+function isStapleFoodQuery(message) {
+  const text = normalizeSearchText(message).toLowerCase();
+  return /\b(tomat|cabai|cabe|bawang|beras|telur|ayam|daging|gula|minyak|minyak goreng|sayur|sayuran|pangan|sembako|kentang|wortel)\b/.test(text);
+}
+
+const PIHPS_COMMODITY_DEFINITIONS = [
+  { name: "Bawang Merah Ukuran Sedang", aliases: ["bawang merah", "bw merah"] },
+  { name: "Bawang Putih Ukuran Sedang", aliases: ["bawang putih", "bw putih"] },
+  { name: "Cabai Merah Keriting ", aliases: ["cabai", "cabe", "cabai merah", "cabai keriting", "cabe merah", "cabe keriting"] },
+  { name: "Cabai Rawit Merah", aliases: ["cabai rawit", "cabe rawit", "rawit merah", "cabai rawit merah"] },
+  { name: "Beras Kualitas Medium I", aliases: ["beras", "beras medium"] },
+  { name: "Telur Ayam Ras Segar", aliases: ["telur", "telur ayam", "telor", "telor ayam"] },
+  { name: "Daging Ayam Ras Segar", aliases: ["ayam", "daging ayam"] },
+  { name: "Daging Sapi Kualitas 1", aliases: ["daging", "daging sapi", "sapi"] },
+  { name: "Gula Pasir Lokal", aliases: ["gula", "gula pasir"] },
+  { name: "Minyak Goreng Curah", aliases: ["minyak", "minyak goreng"] },
+  { name: "Kentang", aliases: ["kentang"] },
+  { name: "Wortel", aliases: ["wortel"] }
+];
+
+function detectPihpsCommodity(message) {
+  const text = normalizeSearchText(message).toLowerCase();
+  return PIHPS_COMMODITY_DEFINITIONS.find((item) => item.aliases.some((alias) => text.includes(alias))) || null;
 }
 
 const COINGECKO_ASSETS = [
@@ -526,13 +663,25 @@ function formatCryptoPriceReply(lines, message) {
     const change = Number.isFinite(line.change24h)
       ? `, 24 jam ${line.change24h >= 0 ? "+" : ""}${line.change24h.toFixed(2)}%`
       : "";
-    const updated = line.updatedAt ? ` (${line.updatedAt})` : "";
-    return `${line.symbol}: ${prices}${change}${updated}`;
+    return `${line.name} (${line.symbol}) sekarang sekitar ${prices}${change}.`;
+  }).join("\n");
+
+  const updated = lines.find((line) => line.updatedAt)?.updatedAt || "";
+  return isIndonesian
+    ? `${body}${updated ? `\nSumber: CoinGecko, ${updated}.` : "\nSumber: CoinGecko."}`
+    : `${body}${updated ? `\nSource: CoinGecko, ${updated}.` : "\nSource: CoinGecko."}`;
+}
+
+function formatHistoricalCryptoPriceReply(lines, message, context) {
+  const isIndonesian = /\b(harga|berapa|rupiah|hari ini|sekarang|saat ini|lalu)\b/i.test(message);
+  const body = lines.map((line) => {
+    const prices = line.prices.map((item) => item.text).filter(Boolean).join(" / ");
+    return `${line.name} (${line.symbol}) pada ${context.displayLabel} sekitar ${prices}.`;
   }).join("\n");
 
   return isIndonesian
-    ? `Harga crypto yang saya temukan:\n${body}\n\nSumber: CoinGecko.`
-    : `Crypto price found:\n${body}\n\nSource: CoinGecko.`;
+    ? `${body}\nSumber: CoinGecko historical data, ${context.displayLabel}.`
+    : `${body}\nSource: CoinGecko historical data for ${context.displayLabel}.`;
 }
 
 async function fetchCoinGeckoCryptoPrice(client, message) {
@@ -591,6 +740,281 @@ async function fetchCoinGeckoCryptoPrice(client, message) {
   };
 }
 
+async function fetchCoinGeckoHistoricalCryptoPrice(client, message) {
+  const context = buildHistoricalDateContext(message);
+  const assets = detectCryptoAssets(message);
+  if (!context || !assets.length) return null;
+
+  const currencies = detectCryptoCurrencies(message);
+  const headers = { Accept: "application/json" };
+  if (COINGECKO_API_KEY) headers["x-cg-demo-api-key"] = COINGECKO_API_KEY;
+  const baseUrl = String(COINGECKO_SIMPLE_PRICE_URL || "https://api.coingecko.com/api/v3/simple/price").replace(/\/simple\/price.*$/i, "");
+
+  const settled = await Promise.allSettled(
+    assets.map(async (asset) => {
+      const response = await client.get(`${baseUrl}/coins/${asset.id}/history`, {
+        headers,
+        params: {
+          date: context.coingeckoDate,
+          localization: "false"
+        }
+      });
+      return {
+        asset,
+        data: response.data || {}
+      };
+    })
+  );
+
+  const lines = settled
+    .filter((entry) => entry.status === "fulfilled")
+    .map((entry) => {
+      const asset = entry.value.asset;
+      const prices = currencies
+        .map((currency) => ({
+          currency,
+          text: formatCryptoCurrency(entry.value.data?.market_data?.current_price?.[currency], currency)
+        }))
+        .filter((item) => item.text);
+
+      if (!prices.length) return null;
+      return {
+        symbol: asset.symbol,
+        name: asset.name,
+        prices
+      };
+    })
+    .filter(Boolean);
+
+  if (!lines.length) return null;
+
+  return {
+    name: "web.live",
+    summary: [
+      `CoinGecko historical crypto price data for ${context.displayLabel}:`,
+      ...lines.map((line) => {
+        const prices = line.prices.map((item) => `${item.currency.toUpperCase()} ${item.text}`).join(", ");
+        return `${line.symbol} (${line.name}): ${prices}.`;
+      })
+    ].join("\n"),
+    directReply: formatHistoricalCryptoPriceReply(lines, message, context)
+  };
+}
+
+function formatRupiahNumber(value = "") {
+  const digits = String(value || "").replace(/[^\d]/g, "").trim();
+  if (!digits) return "";
+  return `Rp ${new Intl.NumberFormat("id-ID").format(Number(digits))}`;
+}
+
+function formatUsdNumber(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "";
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(amount);
+}
+
+function formatPihpsDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(APP_LOCALE, { dateStyle: "medium" }).format(date);
+}
+
+function buildJinaUrl(url) {
+  const normalizedBase = String(JINA_BASE_URL || "https://r.jina.ai/http://").trim();
+  if (!url) return normalizedBase;
+  if (/^https?:\/\//i.test(url)) {
+    return `${normalizedBase}${url.replace(/^https?:\/\//i, "")}`;
+  }
+  return `${normalizedBase}${url}`;
+}
+
+async function fetchViaJina(url, { accept = "*/*" } = {}) {
+  if (!JINA_API_KEY) {
+    throw new Error("Jina API key not configured.");
+  }
+  const response = await axios.get(buildJinaUrl(url), {
+    timeout: 20000,
+    proxy: false,
+    responseType: "text",
+    headers: {
+      Accept: accept || "*/*",
+      Authorization: `Bearer ${JINA_API_KEY}`,
+      "User-Agent": "Mozilla/5.0"
+    }
+  });
+  return String(response?.data || "");
+}
+
+async function fetchWithCurl(url, { referer = "", accept = "*/*" } = {}) {
+  const args = ["-sS", "-L", "--max-time", "20", "-A", "Mozilla/5.0", "-H", `Accept: ${accept}`];
+  if (referer) {
+    args.push("-e", referer);
+  }
+  args.push(url);
+  try {
+    const { stdout } = await execFileAsync("curl", args, { maxBuffer: 2 * 1024 * 1024 });
+    return String(stdout || "");
+  } catch (error) {
+    if (!JINA_API_KEY) throw error;
+    return fetchViaJina(url, { accept });
+  }
+}
+
+function cleanFetchedUrlContent(raw = "") {
+  return String(raw || "")
+    .replace(/\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)/g, "")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/^Title:\s*/im, "Judul: ")
+    .replace(/^URL Source:\s*/gim, "Sumber URL: ")
+    .replace(/^Markdown Content:\s*$/gim, "")
+    .replace(/^\s*\/html\b.*$/gim, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractDirectUrlContext(raw = "") {
+  const cleaned = cleanFetchedUrlContent(raw)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^Sumber URL:/i.test(line))
+    .filter((line) => !/^!\[.*\]\(.*\)$/.test(line))
+    .filter((line) => !/^\[!\[.*\]\(.*\)\]\(.*\)$/.test(line))
+    .filter((line) => !/^blob:http/i.test(line));
+
+  return cleaned.join("\n").slice(0, 5000).trim();
+}
+
+async function fetchDirectUrlContent(message = "") {
+  const url = extractFirstUrl(message);
+  if (!url) return null;
+  const raw = await fetchViaJina(url, { accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" });
+  const contextText = extractDirectUrlContext(raw);
+  const host = (() => {
+    try { return new URL(url).hostname; } catch { return url; }
+  })();
+  return {
+    name: "web.live",
+    summary: `Fetched direct URL via Jina for ${host}. Use the fetched page content to answer the user's actual request, not by echoing raw excerpts.` ,
+    contextText,
+    directReply: contextText ? "" : `Saya belum berhasil ambil isi dari ${host}.`,
+    passToModel: Boolean(contextText),
+    engine: { score: 1, evidence: [{ sourceLabel: "jina", confidence: 1 }] }
+  };
+}
+
+async function fetchPihpsCommodityPrice(message) {
+  const commodity = detectPihpsCommodity(message);
+  if (!commodity) return null;
+
+  const pageHtml = await fetchWithCurl(PIHPS_PAGE_URL, { referer: PIHPS_PAGE_URL, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" });
+  const tempMatch = pageHtml.match(/id="temp_id"[^>]*value="([^"]+)"/i);
+  const tempId = String(tempMatch?.[1] || "").trim();
+  if (!tempId) return null;
+
+  const chartUrl = `${PIHPS_CHART_URL}?tempId=${encodeURIComponent(tempId)}&comName=${encodeURIComponent(commodity.name)}`;
+  const raw = await fetchWithCurl(chartUrl, { referer: PIHPS_PAGE_URL, accept: "application/json,text/plain,*/*" });
+  const payload = JSON.parse(raw || "{}");
+  const points = Array.isArray(payload?.data) ? payload.data : [];
+  const latest = [...points].reverse().find((item) => Number.isFinite(Number(item?.nominal)));
+  if (!latest) return null;
+
+  const nominal = Number(latest.nominal);
+  const unit = String(latest.denomination || "kg").trim();
+  const formattedNominal = `Rp ${new Intl.NumberFormat("id-ID").format(nominal)}`;
+  const formattedDate = formatPihpsDate(latest.date);
+  const nationalLabel = /\b(di|daerah|provinsi|kota|kabupaten|bandung|jakarta|jabar|jatim|jateng|surabaya|bogor|depok|bekasi)\b/i.test(normalizeSearchText(message))
+    ? "Saya baru nemu angka rata-rata nasional dari PIHPS, belum angka daerah spesifik."
+    : "";
+
+  return {
+    name: "web.live",
+    summary: [
+      "Portal harga pangan resmi:",
+      `PIHPS Nasional / BI ${commodity.name}: ${formattedNominal} per ${unit}${formattedDate ? `, data ${formattedDate}` : ""}.`,
+      `Panel Harga Pangan tersedia sebagai fallback portal: ${PANEL_HARGA_PANGAN_URL}`,
+      nationalLabel
+    ].filter(Boolean).join("\n"),
+    directReply: [
+      `Harga ${commodity.name.toLowerCase()} sekarang sekitar ${formattedNominal}/${unit}.`,
+      nationalLabel,
+      `Sumber: PIHPS Nasional / BI${formattedDate ? `, ${formattedDate}` : ""}.`
+    ].filter(Boolean).join(" ")
+  };
+}
+
+async function fetchPanelHargaPanganPortal() {
+  const html = await fetchWithCurl(PANEL_HARGA_PANGAN_URL, {
+    referer: PANEL_HARGA_PANGAN_URL,
+    accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+  }).catch(() => "");
+  if (!/Panel Harga Pangan/i.test(html)) return null;
+  return {
+    name: "web.live",
+    summary: `Portal fallback harga pangan tersedia: Panel Harga Pangan (${PANEL_HARGA_PANGAN_URL}).`,
+    directReply: ""
+  };
+}
+
+async function fetchLogamMuliaGoldPrice(client, message) {
+  if (!isGoldQuery(message)) return null;
+
+  const response = await client.get(LOGAM_MULIA_PRICE_URL);
+  const html = String(response.data || "");
+  const dateMatch = html.match(/Harga Emas Hari Ini,\s*([^<]+)/i);
+  const updateMatch = html.match(/Harga di-update setiap hari[^<]+/i);
+  const oneGramMatch = html.match(/<td>1 gr<\/td>[\s\S]{0,250}?<td[^>]*style="text-align:right;">([^<]+)<\/td>/i);
+  const halfGramMatch = html.match(/<td>0\.5 gr<\/td>[\s\S]{0,250}?<td[^>]*style="text-align:right;">([^<]+)<\/td>/i);
+
+  if (!oneGramMatch?.[1]) return null;
+
+  const oneGram = formatRupiahNumber(oneGramMatch[1]);
+  const halfGram = formatRupiahNumber(halfGramMatch?.[1] || "");
+  const dateLabel = String(dateMatch?.[1] || "").trim();
+  const updateLabel = String(updateMatch?.[0] || "").replace(/\s+/g, " ").trim();
+
+  const directReply = [
+    `Harga emas Antam 1 gram sekarang sekitar ${oneGram}.`,
+    halfGram ? `Untuk 0,5 gram sekitar ${halfGram}.` : "",
+    `Sumber: Logam Mulia${dateLabel ? `, ${dateLabel}` : ""}${updateLabel ? ` · ${updateLabel}` : ""}.`
+  ].filter(Boolean).join(" ");
+
+  return {
+    name: "web.live",
+    summary: [
+      "Portal harga emas resmi:",
+      `Logam Mulia Antam 1 gr: ${oneGram}${halfGram ? `, 0.5 gr: ${halfGram}` : ""}${dateLabel ? `, tanggal ${dateLabel}` : ""}${updateLabel ? `, ${updateLabel}` : ""}.`
+    ].join("\n"),
+    directReply
+  };
+}
+
+async function fetchYahooFinanceGoldPrice(client, message) {
+  if (!isGoldQuery(message)) return null;
+
+  const response = await client.get(YAHOO_FINANCE_GOLD_URL, {
+    headers: { Accept: "application/json" }
+  });
+  const meta = response.data?.chart?.result?.[0]?.meta || {};
+  const price = formatUsdNumber(meta.regularMarketPrice);
+  if (!price) return null;
+
+  const updatedAt = Number(meta.regularMarketTime)
+    ? new Intl.DateTimeFormat(APP_LOCALE, { dateStyle: "medium", timeStyle: "short" }).format(new Date(Number(meta.regularMarketTime) * 1000))
+    : "";
+  const symbol = meta.symbol || "GC=F";
+
+  return {
+    name: "web.live",
+    summary: [
+      "Portal harga market:",
+      `Yahoo Finance ${symbol}: ${price}${updatedAt ? `, updated ${updatedAt}` : ""}.`
+    ].join("\n"),
+    directReply: `Harga gold futures sekarang sekitar ${price}.${updatedAt ? ` Sumber: Yahoo Finance, ${updatedAt}.` : " Sumber: Yahoo Finance."}`
+  };
+}
+
 function cleanLiveQuery(message) {
   return sanitizeSearchQueryText(message);
 }
@@ -600,6 +1024,12 @@ function buildSearchQuery(message) {
   const lower = queryText.toLowerCase();
   const commodity = extractCommodityLabel(message);
   const location = extractLocationLabel(message);
+  const historicalContext = buildHistoricalDateContext(message);
+
+  if (isHistoricalCryptoPriceQuery(message) && historicalContext) {
+    const assetNames = detectCryptoAssets(message).map((asset) => asset.name).join(" ") || queryText;
+    return `${assetNames} price ${historicalContext.displayLabel}`.trim();
+  }
 
   if (/\b(vice president|wakil presiden|vp|president|presiden|prime minister|perdana menteri|ceo|governor|gubernur|minister|menteri|secretary|sekretaris|defense|pertahanan|perang|queen|ratu|king|raja|monarch)\b/.test(lower)) {
     return queryText.replace(/^\s*(siapa|who is)\s+/i, "").trim();
@@ -645,6 +1075,11 @@ function buildSearchQuery(message) {
 function buildFallbackSearchQuery(message, queryKind) {
   const normalized = normalizeSearchText(message);
   const lower = normalized.toLowerCase();
+  const historicalContext = buildHistoricalDateContext(message);
+
+  if (queryKind === "price" && isHistoricalCryptoPriceQuery(message) && historicalContext) {
+    return `${normalized} historical price ${historicalContext.displayLabel}`;
+  }
 
   if (queryKind === "office") {
     if (/\b(wakil presiden|vice president|vp)\b/.test(lower)) {
@@ -711,8 +1146,14 @@ function buildSecondHopSearchQueries(message, queryKind) {
     queries.push(`${simplified} current total`);
   } else if (queryKind === "price" || queryKind === "stock") {
     const simplified = cleanLiveQuery(message);
-    queries.push(`${simplified} official`);
-    queries.push(`${simplified} resmi`);
+    const historicalContext = buildHistoricalDateContext(message);
+    if (queryKind === "price" && isHistoricalCryptoPriceQuery(message) && historicalContext) {
+      queries.push(`${simplified} historical price ${historicalContext.displayLabel}`);
+      queries.push(`${simplified} ${historicalContext.displayLabel}`);
+    } else {
+      queries.push(`${simplified} official`);
+      queries.push(`${simplified} resmi`);
+    }
   }
 
   queries.push(primary, fallback);
@@ -824,6 +1265,139 @@ function detectQueryKind(message) {
 
 function classifyLiveIntent(message) {
   return detectQueryKind(message);
+}
+
+function classifyLiveCategory(message = "", queryKind = classifyLiveIntent(message), hint = "") {
+  const text = normalizeSearchText(message).toLowerCase();
+  if (hint) return hint;
+
+  if (queryKind === "office") return "office";
+  if (queryKind === "person_relation") return "person_relation";
+  if (queryKind === "count") return "count";
+  if (queryKind === "stock") return "stock";
+
+  if (queryKind === "price") {
+    if (isHistoricalCryptoPriceQuery(message)) return "crypto_price_historical";
+    if (isCryptoQuery(message)) return "crypto_price";
+    if (isGoldQuery(message)) return "gold_price";
+    if (isStapleFoodQuery(message)) return "staple_price";
+    if (/\b(usd|idr|rupiah|dollar|dolar|forex|kurs|exchange)\b/.test(text)) return "forex_price";
+    return "general_price";
+  }
+
+  if (/\b(olahraga|sports?|bola|liga|nba|motogp|f1|badminton|bulu tangkis)\b/.test(text)) return "sports_news";
+  if (/\b(teknologi|technology|tech|ai|openai|chatgpt|gadget|iphone|android|startup|server|cloud|cyber)\b/.test(text)) return "technology_news";
+  if (/\b(ekonomi|economy|bisnis|business|inflasi|bank indonesia|market|pasar modal)\b/.test(text)) return "economy_news";
+  return "general_news";
+}
+
+function sourcePlanForCategory(category = "general_news") {
+  switch (category) {
+    case "crypto_price_historical":
+      return ["coingecko_historical", "crypto_rss", "search"];
+    case "crypto_price":
+      return ["coingecko", "crypto_rss", "search"];
+    case "gold_price":
+      return ["logam_mulia", "yahoo_gold", "registry_rss", "search"];
+    case "staple_price":
+      return ["pihps", "panel_harga_pangan", "registry_rss", "search"];
+    case "technology_news":
+    case "sports_news":
+    case "economy_news":
+    case "general_news":
+      return ["registry_rss", "search"];
+    case "person_relation":
+      return ["search", "wikipedia"];
+    case "count":
+      return ["search", "wikipedia"];
+    case "office":
+      return ["search", "wikipedia"];
+    default:
+      return ["search"];
+  }
+}
+
+function wikipediaPriorityForCategory(category = "") {
+  const value = String(category || "").trim().toLowerCase();
+  if (!value) return "none";
+  if (value === "person_relation" || value.includes("knowledge") || value.includes("history")) return "high";
+  if (value === "count" || value.includes("statistic")) return "medium";
+  if (value === "office" || value.includes("official") || value.includes("legal")) return "low";
+  return "none";
+}
+
+function sourceBucketForCategory(category = "", queryKind = "") {
+  const value = String(category || "").trim().toLowerCase();
+  if (value.includes("legal")) return "legal";
+  if (value === "office" || value.includes("official")) return "official";
+  if (value === "count" || value.includes("statistic")) return "statistic";
+  if (value.includes("history")) return "history";
+  if (value === "person_relation" || value.includes("knowledge")) return "knowledge";
+  if (queryKind === "count" || queryKind === "price" || queryKind === "stock") return "statistic";
+  return "knowledge";
+}
+
+function orderSearchPayloadsForCategory(category = "", payloads = {}) {
+  const priority = wikipediaPriorityForCategory(category);
+  const ordered = [];
+
+  if (priority === "high") {
+    ordered.push(payloads.wikipedia, payloads.google, payloads.registry, payloads.crypto);
+  } else if (priority === "medium") {
+    ordered.push(payloads.google, payloads.wikipedia, payloads.registry, payloads.crypto);
+  } else if (priority === "low") {
+    ordered.push(payloads.google, payloads.registry, payloads.crypto, payloads.wikipedia);
+  } else {
+    ordered.push(payloads.google, payloads.registry, payloads.crypto);
+  }
+
+  return ordered.filter(Boolean);
+}
+
+function resolveLiveRoute(message = "", options = {}) {
+  const intent = classifyLiveIntent(message);
+  const category = classifyLiveCategory(message, intent, String(options.categoryHint || "").trim().toLowerCase());
+  return {
+    intent,
+    category,
+    sources: sourcePlanForCategory(category)
+  };
+}
+
+function classifyFeedCategory(message = "", routeCategory = "") {
+  const text = normalizeSearchText(message).toLowerCase();
+  if (routeCategory === "crypto_price_historical") return "crypto";
+  if (routeCategory === "crypto_price") return "crypto";
+  if (routeCategory === "economy_news" || routeCategory === "gold_price" || routeCategory === "stock" || routeCategory === "forex_price" || routeCategory === "general_price") return "economy";
+  if (routeCategory === "sports_news") return "sports";
+  if (routeCategory === "technology_news") return "technology";
+  if (isCryptoQuery(message) || /\b(blockchain|bitcoin|ethereum|altcoin|defi|nft|web3|crypto)\b/.test(text)) return "crypto";
+  if (/\b(ekonomi|economy|bisnis|business|inflasi|suku bunga|bank indonesia|rupiah|pdb|market|pasar modal|saham|stock|emas|gold|forex|dolar|usd|idr)\b/.test(text)) return "economy";
+  if (/\b(olahraga|sports?|bola|sepak bola|liga|premier league|champions league|f1|motogp|nba|badminton|bulu tangkis)\b/.test(text)) return "sports";
+  if (/\b(teknologi|technology|tech|ai|openai|chatgpt|gadget|smartphone|iphone|android|startup|internet|server|cloud|cyber|keamanan siber)\b/.test(text)) return "technology";
+  return "general";
+}
+
+function getRelevantRssSources(message = "", routeCategory = "") {
+  const category = classifyFeedCategory(message, routeCategory);
+  const text = normalizeSearchText(message).toLowerCase();
+  const prefersGlobal = /\b(global|internasional|international|world|amerika|us|usa|china|eropa|europe|inggris|uk)\b/.test(text);
+  const preferred = LIVE_RSS_SOURCE_REGISTRY
+    .filter((source) => source.category === category || (category === "crypto" && source.category === "crypto_market"))
+    .filter((source) => prefersGlobal ? source.language === "en" : true)
+    .sort((a, b) => b.priority - a.priority);
+  const localPreferred = !prefersGlobal
+    ? preferred.filter((source) => source.language === "id")
+    : preferred;
+  const globalPreferred = preferred.filter((source) => source.language === "en");
+  const general = LIVE_RSS_SOURCE_REGISTRY
+    .filter((source) => source.category === "general" && (prefersGlobal ? source.language === "en" : source.language === "id"))
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, 2);
+  const ordered = prefersGlobal
+    ? [...globalPreferred, ...localPreferred, ...general]
+    : [...localPreferred, ...globalPreferred.slice(0, 2), ...general];
+  return [...new Map(ordered.map((item) => [item.url, item])).values()].slice(0, 6);
 }
 
 const OFFICE_ROLE_DEFINITIONS = [
@@ -982,6 +1556,11 @@ function formatStockPriceReply(profile, amount, source) {
 function buildInconclusiveReply(message, queryKind) {
   const subject = sanitizeSearchQueryText(message).replace(/[?!.]+$/g, "").trim() || "permintaan ini";
   const isExplicitPrice = /\b(harga|price|rate|kurs)\b/i.test(message);
+  const historicalContext = buildHistoricalDateContext(message);
+
+  if (queryKind === "price" && isHistoricalCryptoPriceQuery(message) && historicalContext) {
+    return `Saya belum bisa memastikan harga historis untuk "${subject}" pada ${historicalContext.displayLabel}. Mau saya cari di sumber lain?`;
+  }
 
   if (queryKind === "price") {
     return isExplicitPrice
@@ -1475,37 +2054,101 @@ function extractSearchResults(xml, options = {}) {
 
   for (const item of items.slice(0, 10)) {
     const block = item[1] || "";
-    const title = stripHtml(block.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "").trim();
+
+    // Title: strip CDATA and HTML
+    const rawTitle = block.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "";
+    const title = stripHtml(rawTitle.replace(/<!\[CDATA\[|\]\]>/g, "")).trim();
+
+    // Link
     const link = (block.match(/<link>([\s\S]*?)<\/link>/i)?.[1] || "").trim();
-    const rawDesc = block.match(/<description>([\s\S]*?)<\/description>/i)?.[1] || "";
-    const decodedDesc = rawDesc.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/&quot;/g, "\"");
-    const snippet = stripHtml(decodedDesc).trim();
+
+    // Source (media outlet name)
     const source = stripHtml(block.match(/<source[^>]*>([\s\S]*?)<\/source>/i)?.[1] || "").trim() || sourceLabel;
+
+    // Publication date — keep for context
+    const rawPubDate = (block.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1] || "").trim();
+    const pubDate = rawPubDate ? rawPubDate.replace(/\s*\+0000$/, "").trim() : "";
+
+    // Description: Google News RSS description is just "{title} &nbsp; &nbsp; {source}"
+    // Strip that noise and build a meaningful snippet from title + date instead
+    const rawDesc = block.match(/<description>([\s\S]*?)<\/description>/i)?.[1] || "";
+    const decodedDesc = rawDesc
+      .replace(/<!\[CDATA\[|\]\]>/g, "")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'");
+    const rawSnippet = stripHtml(decodedDesc)
+      .replace(/&nbsp;/gi, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+
+    // If snippet is just "title - source" pattern (Google News default), use date instead
+    const isTrivialSnippet = !rawSnippet
+      || rawSnippet === title
+      || rawSnippet.replace(/\s*-?\s*$/, "").toLowerCase().endsWith((source || "").toLowerCase())
+      || rawSnippet.toLowerCase().replace(/\s+/g, " ").includes(title.toLowerCase().substring(0, 30));
+
+    const snippet = isTrivialSnippet
+      ? (pubDate ? `Dipublikasikan: ${pubDate}` : "")
+      : rawSnippet.substring(0, 300);
+
+    // Freshness: track age but don't skip — we sort fresh-first after collecting all
+    let pubTimestamp = 0;
+    if (rawPubDate) {
+      const parsed = Date.parse(rawPubDate);
+      if (!isNaN(parsed)) pubTimestamp = parsed;
+    }
+    const ageMs = pubTimestamp ? Date.now() - pubTimestamp : Number.MAX_SAFE_INTEGER;
 
     if (!title) continue;
     results.push({
       url: link,
+      source,
+      pubDate,
+      ageMs,
       title: source ? `${title} - ${source}` : title,
-      snippet: snippet ? snippet.substring(0, 300) : ""
+      snippet
     });
-    if (results.length >= 5) break;
+    if (results.length >= 10) break; // collect more, will trim after sort
   }
 
-  const allSnippetText = results.map((r) => r.snippet).join(" ");
-  const priceHints = (allSnippetText.match(/Rp[\s.]?[\d.,]+(?:[\s]*(?:\/liter|\/kg|\/gram|per liter|per kg|ribu|juta|rb\.?|jt\.?))?/gi) || []).slice(0, 5).join(", ");
-  const pageText = results.map((r) => `${r.title}. ${r.snippet}`).join(" ").trim();
+  // Sort: fresh articles first (lowest ageMs), unknown age last
+  results.sort((a, b) => (a.ageMs || Number.MAX_SAFE_INTEGER) - (b.ageMs || Number.MAX_SAFE_INTEGER));
+  const topResults = results.slice(0, 5);
 
-  if (priceHints && !results.some((r) => /Rp/i.test(r.snippet))) {
-    results.push({ url: "", title: "Harga terdeteksi", snippet: priceHints });
+  const allSnippetText = topResults.map((r) => r.snippet).join(" ");
+  const priceHints = (allSnippetText.match(/Rp[\s.]?[\d.,]+(?:[\s]*(?:\/liter|\/kg|\/gram|per liter|per kg|ribu|juta|rb\.?|jt\.?))?/gi) || []).slice(0, 5).join(", ");
+  const pageText = topResults.map((r) => `${r.title}. ${r.snippet}`).join(" ").trim();
+
+  if (priceHints && !topResults.some((r) => /Rp/i.test(r.snippet))) {
+    topResults.push({ url: "", title: "Harga terdeteksi", snippet: priceHints });
   }
 
   return {
-    results: results.slice(0, 5),
+    results: topResults.slice(0, 5),
     pageText: pageText.slice(0, 5000),
     entityTitle: "",
     entitySubtitle: "",
     instantAnswer: ""
   };
+}
+
+function extractSourceLabelFromTitle(title = "") {
+  const value = stripHtml(title).trim();
+  if (!value) return "";
+  const parts = value.split(" - ").map((part) => part.trim()).filter(Boolean);
+  return parts.length >= 2 ? parts[parts.length - 1] : "";
+}
+
+function resolveResultSourceLabel(result = {}, fallback = "Google News") {
+  return String(result?.source || extractSourceLabelFromTitle(result?.title || "") || fallback).trim();
+}
+
+function resolvePayloadSourceLabel(payload = {}, fallback = "Google News") {
+  const firstResult = Array.isArray(payload?.results) ? payload.results.find((item) => item && (item.source || item.title || item.snippet)) : null;
+  return resolveResultSourceLabel(firstResult, fallback);
 }
 
 function buildSnapshotSummary(query, payload) {
@@ -1675,8 +2318,52 @@ function buildSearchSummary(query, payload, message) {
   return [...new Set(parts)].join(" ").trim();
 }
 
-function makeCandidate(kind, sourceStage, summary, directReply, score) {
-  return { kind, sourceStage, summary, directReply, score };
+function detectSourceType(label = "") {
+  const value = String(label || "").toLowerCase();
+  if (!value) return "unknown";
+  if (/\.go\.|\.gov|\.ac\.|\.edu|official|resmi|coingecko|idx|bca\.co\.id/.test(value)) return "official";
+  if (/wikipedia|wikimedia/.test(value)) return "reference";
+  if (/cnbc|detik|kompas|tempo|bisnis|kontan|yahoo|bloomberg|reuters|investing/.test(value)) return "publisher";
+  if (/google news|rss|blog|forum/.test(value)) return "aggregator";
+  return "publisher";
+}
+
+function sourceWeight(sourceType = "unknown", sourceBucket = "") {
+  if (sourceType === "official") return 1;
+  if (sourceType === "reference") {
+    if (sourceBucket === "knowledge" || sourceBucket === "history") return 0.92;
+    if (sourceBucket === "statistic") return 0.74;
+    if (sourceBucket === "official" || sourceBucket === "legal") return 0.42;
+    return 0.7;
+  }
+  if (sourceType === "publisher") return 0.84;
+  if (sourceType === "aggregator") return 0.66;
+  return 0.58;
+}
+
+function summarizeEvidenceText(summary = "", directReply = "") {
+  const clean = String(summary || directReply || "").replace(/\s+/g, " ").trim();
+  return clean.length > 180 ? `${clean.slice(0, 177)}...` : clean;
+}
+
+function makeCandidate(kind, sourceStage, summary, directReply, score, extra = {}) {
+  const sourceLabel = extra.sourceLabel || "Google News";
+  const sourceType = extra.sourceType || detectSourceType(sourceLabel);
+  const sourceBucket = String(extra.sourceBucket || "").trim().toLowerCase();
+  const weightedScore = Math.max(0, Math.min(1, Number(score || 0) * sourceWeight(sourceType, sourceBucket)));
+  return {
+    kind,
+    sourceStage,
+    summary,
+    directReply,
+    score: weightedScore,
+    rawScore: Number(score || 0),
+    sourceLabel,
+    sourceType,
+    sourceBucket,
+    evidence: extra.evidence || summarizeEvidenceText(summary, directReply),
+    confidence: Math.round(weightedScore * 100)
+  };
 }
 
 function scoreExtraction(kind, sourceStage, directReply = "") {
@@ -1693,8 +2380,9 @@ function scoreExtraction(kind, sourceStage, directReply = "") {
   return Math.max(sourceBoost, kindBoostMap[kind] || sourceBoost);
 }
 
-function extractFromSearchSummary(message, queryKind, query, searchPayload) {
-  const source = "Google News";
+function extractFromSearchSummary(message, queryKind, query, searchPayload, options = {}) {
+  const source = resolvePayloadSourceLabel(searchPayload, "Google News");
+  const sourceBucket = sourceBucketForCategory(options.routeCategory, queryKind);
   const ticker = extractTicker(message);
   const searchSummaryText = buildSearchSummary(query, searchPayload, message);
   if (!searchSummaryText) return null;
@@ -1704,13 +2392,13 @@ function extractFromSearchSummary(message, queryKind, query, searchPayload) {
     const profile = extractStockProfile(cardOnlyResults, ticker);
     if (isStockIdentityQuestion(message) && profile?.company) {
       const directReply = formatStockIdentityReply(profile, source);
-      return makeCandidate("stock_identity", "google_news_summary", `Fresh Google News result identified stock ${profile.ticker || ticker} as ${profile.company}.`, directReply, scoreExtraction("stock_identity", "google_news_summary", directReply));
+      return makeCandidate("stock_identity", "google_news_summary", `Fresh Google News result identified stock ${profile.ticker || ticker} as ${profile.company}.`, directReply, scoreExtraction("stock_identity", "google_news_summary", directReply), { sourceLabel: source, sourceBucket, evidence: searchSummaryText });
     }
 
     const priceCandidate = extractStockPriceCandidate(cardOnlyResults, ticker);
     if (priceCandidate) {
       const directReply = formatStockPriceReply(profile || { ticker }, priceCandidate, source);
-      return makeCandidate("stock_price", "google_news_summary", `Fresh Google News result found stock price ${formatCompactRupiah(priceCandidate)} for ${ticker || "the requested stock"}.`, directReply, scoreExtraction("stock_price", "google_news_summary", directReply));
+      return makeCandidate("stock_price", "google_news_summary", `Fresh Google News result found stock price ${formatCompactRupiah(priceCandidate)} for ${ticker || "the requested stock"}.`, directReply, scoreExtraction("stock_price", "google_news_summary", directReply), { sourceLabel: source, sourceBucket, evidence: searchSummaryText });
     }
   }
 
@@ -1727,7 +2415,7 @@ function extractFromSearchSummary(message, queryKind, query, searchPayload) {
       : "";
     if (officeHolder) {
       const directReply = formatOfficeReply(officeHolder, source, message);
-      return makeCandidate("office", "google_news_summary", `Fresh Google News result found office holder ${officeHolder}.`, directReply, scoreExtraction("office", "google_news_summary", directReply));
+      return makeCandidate("office", "google_news_summary", `Fresh Google News result found office holder ${officeHolder}.`, directReply, scoreExtraction("office", "google_news_summary", directReply), { sourceLabel: source, sourceBucket, evidence: officeEvidence });
     }
   }
 
@@ -1735,7 +2423,7 @@ function extractFromSearchSummary(message, queryKind, query, searchPayload) {
     const countValue = findCountFact(searchSummaryText, searchPayload.entityTitle, message);
     if (countValue) {
       const directReply = formatCountReply(countValue, source, message);
-      return makeCandidate("count", "google_news_summary", `Fresh Google News result found count ${countValue}.`, directReply, scoreExtraction("count", "google_news_summary", directReply));
+      return makeCandidate("count", "google_news_summary", `Fresh Google News result found count ${countValue}.`, directReply, scoreExtraction("count", "google_news_summary", directReply), { sourceLabel: source, sourceBucket, evidence: searchSummaryText });
     }
   }
 
@@ -1744,20 +2432,21 @@ function extractFromSearchSummary(message, queryKind, query, searchPayload) {
       .filter(Boolean)
       .join(" ")
       .trim();
-    const priceValue = priceCardText && hasRelevantPriceMatch(priceCardText, message, query)
+    const priceValue = priceCardText && hasRelevantPriceMatch(priceCardText, message, query) && hasHistoricalDateMatch(priceCardText, message)
       ? findPrice(priceCardText, message)
       : "";
     if (priceValue) {
       const directReply = formatPriceReply(priceValue, source, message, priceCardText);
-      return makeCandidate("price", "google_news_summary", `Fresh Google News result found ${priceValue}.`, directReply, scoreExtraction("price", "google_news_summary", directReply));
+      return makeCandidate("price", "google_news_summary", `Fresh Google News result found ${priceValue}.`, directReply, scoreExtraction("price", "google_news_summary", directReply), { sourceLabel: source, sourceBucket, evidence: priceCardText });
     }
   }
 
   return null;
 }
 
-function extractFromSearchResults(message, queryKind, results, searchPayload, query) {
-  const source = "Google News";
+function extractFromSearchResults(message, queryKind, results, searchPayload, query, options = {}) {
+  const source = resolvePayloadSourceLabel(searchPayload, "Google News");
+  const sourceBucket = sourceBucketForCategory(options.routeCategory, queryKind);
   const ticker = extractTicker(message);
   const searchSummaryText = buildSearchSummary(query, searchPayload, message);
 
@@ -1765,13 +2454,13 @@ function extractFromSearchResults(message, queryKind, results, searchPayload, qu
     const profile = extractStockProfile(results, ticker);
     if (isStockIdentityQuestion(message) && profile?.company) {
       const directReply = formatStockIdentityReply(profile, source);
-      return makeCandidate("stock_identity", "google_news_results", `Fresh Google News result identified stock ${profile.ticker || ticker} as ${profile.company}.`, directReply, scoreExtraction("stock_identity", "google_news_results", directReply));
+      return makeCandidate("stock_identity", "google_news_results", `Fresh Google News result identified stock ${profile.ticker || ticker} as ${profile.company}.`, directReply, scoreExtraction("stock_identity", "google_news_results", directReply), { sourceLabel: source, sourceBucket, evidence: searchSummaryText });
     }
 
     const priceCandidate = extractStockPriceCandidate(results, ticker);
     if (priceCandidate) {
       const directReply = formatStockPriceReply(profile || { ticker }, priceCandidate, source);
-      return makeCandidate("stock_price", "google_news_results", `Fresh Google News result found stock price ${formatCompactRupiah(priceCandidate)} for ${ticker || "the requested stock"}.`, directReply, scoreExtraction("stock_price", "google_news_results", directReply));
+      return makeCandidate("stock_price", "google_news_results", `Fresh Google News result found stock price ${formatCompactRupiah(priceCandidate)} for ${ticker || "the requested stock"}.`, directReply, scoreExtraction("stock_price", "google_news_results", directReply), { sourceLabel: source, sourceBucket, evidence: searchSummaryText });
     }
   }
 
@@ -1779,37 +2468,38 @@ function extractFromSearchResults(message, queryKind, results, searchPayload, qu
     const vehicleRange = findVehiclePriceRange(results);
     if (vehicleRange) {
       const directReply = formatVehiclePriceReply(vehicleRange, source, message);
-      return makeCandidate("vehicle_price", "google_news_results", `Fresh Google News result found used vehicle range ${formatCompactRupiah(vehicleRange.min)} to ${formatCompactRupiah(vehicleRange.max)}.`, directReply, scoreExtraction("vehicle_price", "google_news_results", directReply));
+      return makeCandidate("vehicle_price", "google_news_results", `Fresh Google News result found used vehicle range ${formatCompactRupiah(vehicleRange.min)} to ${formatCompactRupiah(vehicleRange.max)}.`, directReply, scoreExtraction("vehicle_price", "google_news_results", directReply), { sourceLabel: source, sourceBucket, evidence: results.map((r) => [r.title, r.snippet].filter(Boolean).join(" - ")).join(" ") });
     }
   }
 
   for (const result of results.slice(0, 5)) {
     const snippetText = stripHtml([result.title, result.snippet].filter(Boolean).join(" "));
+    const resultSource = resolveResultSourceLabel(result, source);
 
     if (queryKind === "office") {
       if (!hasRelevantOfficeMatch([result.title, result.snippet].filter(Boolean).join(" "), message, query)) continue;
       const officeHolder = findOfficeHolder(snippetText, result.title, message);
       if (officeHolder) {
-        const directReply = formatOfficeReply(officeHolder, source, message);
-        return makeCandidate("office", "google_news_results", `Fresh Google News result found office holder ${officeHolder}.`, directReply, scoreExtraction("office", "google_news_results", directReply));
+        const directReply = formatOfficeReply(officeHolder, resultSource, message);
+        return makeCandidate("office", "google_news_results", `Fresh Google News result found office holder ${officeHolder}.`, directReply, scoreExtraction("office", "google_news_results", directReply), { sourceLabel: resultSource, sourceBucket, evidence: snippetText });
       }
     }
 
     if (queryKind === "count") {
       const countValue = findCountFact(snippetText, result.title, message);
       if (countValue) {
-        const directReply = formatCountReply(countValue, source, message);
-        return makeCandidate("count", "google_news_results", `Fresh Google News result found count ${countValue}.`, directReply, scoreExtraction("count", "google_news_results", directReply));
+        const directReply = formatCountReply(countValue, resultSource, message);
+        return makeCandidate("count", "google_news_results", `Fresh Google News result found count ${countValue}.`, directReply, scoreExtraction("count", "google_news_results", directReply), { sourceLabel: resultSource, sourceBucket, evidence: snippetText });
       }
     }
 
     if (queryKind === "price") {
       const priceEvidence = [result.title, result.snippet].filter(Boolean).join(" ");
-      if (!hasRelevantPriceMatch(priceEvidence, message, query)) continue;
+      if (!hasRelevantPriceMatch(priceEvidence, message, query) || !hasHistoricalDateMatch(priceEvidence, message)) continue;
       const priceValue = findPrice(priceEvidence, message);
       if (priceValue) {
-        const directReply = formatPriceReply(priceValue, source, message, priceEvidence);
-        return makeCandidate("price", "google_news_results", `Fresh Google News result found ${priceValue}.`, directReply, scoreExtraction("price", "google_news_results", directReply));
+        const directReply = formatPriceReply(priceValue, resultSource, message, priceEvidence);
+        return makeCandidate("price", "google_news_results", `Fresh Google News result found ${priceValue}.`, directReply, scoreExtraction("price", "google_news_results", directReply), { sourceLabel: resultSource, sourceBucket, evidence: priceEvidence });
       }
     }
   }
@@ -1817,18 +2507,32 @@ function extractFromSearchResults(message, queryKind, results, searchPayload, qu
   return null;
 }
 
+function buildEvidenceLine(candidate) {
+  if (!candidate) return "";
+  const evidence = summarizeEvidenceText(candidate.evidence, candidate.directReply);
+  return evidence ? `Evidence: ${evidence}` : "";
+}
+
 function decideLiveOutcome(message, queryKind, query, searchPayload, candidates = [], options = {}) {
-  const ranked = candidates.filter(Boolean).sort((a, b) => b.score - a.score);
+  const ranked = candidates.filter(Boolean).sort((a, b) => b.score - a.score).slice(0, 5);
   const best = ranked[0];
+  const currentDataConfidence = best?.confidence || 0;
+  const evidenceSummary = ranked
+    .slice(0, 3)
+    .map((candidate, index) => `${index + 1}. ${candidate.sourceLabel} (${candidate.sourceType}) score ${candidate.confidence}: ${summarizeEvidenceText(candidate.evidence, candidate.directReply)}`)
+    .join("\n");
+  const snapshot = buildSnapshotSummary(query, searchPayload)
+    || `Google News search found results for "${query}", but snippets were insufficient for direct extraction.`;
+
   if (options.synthesisOnly) {
-    const extracted = best?.directReply && !/\b(Google News|Example|Contoh)\b/i.test(best.directReply)
-      ? `\nBest extracted candidate: ${stripReplySource(best.directReply)}.`
-      : "";
     return {
       name: "web.live",
-      summary: `${buildSnapshotSummary(query, searchPayload)
-        || `Google News search found results for "${query}", but snippets were insufficient for direct extraction.`}${extracted}`,
-      directReply: ""
+      summary: [snapshot, evidenceSummary ? `Top evidence:
+${evidenceSummary}` : "", best ? `Current-data confidence: ${currentDataConfidence}.` : ""]
+        .filter(Boolean)
+        .join("\n"),
+      directReply: "",
+      engine: { score: currentDataConfidence, evidence: ranked.slice(0, 3) }
     };
   }
 
@@ -1836,24 +2540,124 @@ function decideLiveOutcome(message, queryKind, query, searchPayload, candidates 
     return {
       name: "web.live",
       summary: best.summary,
-      directReply: best.directReply
+      directReply: `${stripReplySource(best.directReply)}\n\n${buildEvidenceLine(best)}\n\nScore: ${currentDataConfidence}`,
+      engine: { score: currentDataConfidence, evidence: ranked.slice(0, 3) }
     };
   }
 
-  // Confidence too low for direct extraction — let AI model synthesize from toolContext
   return {
     name: "web.live",
-    summary: buildSnapshotSummary(query, searchPayload)
-      || `Google News search found results for "${query}", but snippets were insufficient for direct extraction.`,
-    directReply: ""  // empty = AI will use toolContext to generate answer
+    summary: [snapshot, evidenceSummary ? `Top evidence:
+${evidenceSummary}` : "", best ? `Current-data confidence: ${currentDataConfidence}.` : ""]
+      .filter(Boolean)
+      .join("\n"),
+    directReply: options.synthesisOnly ? "" : buildInconclusiveReply(message, queryKind),
+    engine: { score: currentDataConfidence, evidence: ranked.slice(0, 3) }
   };
 }
 
+/**
+ * Fetch top article URL from RSS results via Jina Reader to get real content snippet.
+ * Only runs when Jina API key is configured. Returns enriched snippet or null.
+ */
+async function fetchArticleSnippetViaJina(url) {
+  if (!JINA_API_KEY || !url || !/^https?:\/\//i.test(url)) return null;
+  try {
+    const raw = await fetchViaJina(url, { accept: "text/html,application/xhtml+xml" });
+    if (!raw || raw.length < 200) return null;
+    // Extract first meaningful paragraphs (skip navigation/headers)
+    const lines = raw
+      .replace(/```[\s\S]*?```/g, "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 40 && !/^(title|url source|sumber url|markdown content):/i.test(l))
+      .filter((l) => !/^#{1,3}\s/.test(l));  // skip markdown headings
+    return lines.slice(0, 6).join(" ").substring(0, 800) || null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchSearchResults(client, query) {
+  // Append current year to bias Google News toward fresh results
+  const currentYear = new Date().getFullYear();
+  const freshQuery = /\b\d{4}\b/.test(query) ? query : `${query} ${currentYear}`;
+
   const response = await client.get(GOOGLE_NEWS_RSS_URL, {
-    params: { q: query, hl: "id", gl: "ID", ceid: "ID:id" }
+    params: { q: freshQuery, hl: "id", gl: "ID", ceid: "ID:id" }
   });
-  return extractSearchResults(response.data);
+  const parsed = extractSearchResults(response.data);
+
+  // Enrich most recent result with actual article content via Jina Reader
+  if (JINA_API_KEY && parsed.results.length > 0) {
+    // Sort by age ascending (freshest first) before picking for Jina
+    const candidates = parsed.results
+      .filter((r) => r.url && /^https?:\/\//i.test(r.url))
+      .sort((a, b) => (a.ageMs || 0) - (b.ageMs || 0));
+    const topResult = candidates[0] || parsed.results.find((r) => r.url && /^https?:\/\//i.test(r.url));
+    if (topResult) {
+      const articleSnippet = await fetchArticleSnippetViaJina(topResult.url).catch(() => null);
+      if (articleSnippet) {
+        topResult.snippet = articleSnippet;
+        parsed.pageText = parsed.results
+          .map((r) => `${r.title}. ${r.snippet}`)
+          .join(" ")
+          .trim()
+          .slice(0, 5000);
+      }
+    }
+  }
+
+  return parsed;
+}
+
+async function fetchWikipediaResults(client, query) {
+  const languageOrder = ["id", "en"];
+  const collected = [];
+
+  for (const language of languageOrder) {
+    const response = await client.get(`https://${language}.wikipedia.org/w/api.php`, {
+      params: {
+        action: "query",
+        generator: "search",
+        gsrsearch: query,
+        gsrlimit: 5,
+        prop: "extracts|info",
+        inprop: "url",
+        exintro: 1,
+        explaintext: 1,
+        exchars: 420,
+        format: "json",
+        origin: "*"
+      }
+    });
+
+    const pages = Object.values(response?.data?.query?.pages || {})
+      .sort((a, b) => Number(a?.index || 0) - Number(b?.index || 0))
+      .map((page) => ({
+        url: String(page?.fullurl || "").trim(),
+        source: "Wikipedia",
+        title: `${stripHtml(page?.title || "").trim()} - Wikipedia`,
+        snippet: stripHtml(page?.extract || "").trim().slice(0, 420)
+      }))
+      .filter((page) => page.title || page.snippet);
+
+    for (const page of pages) {
+      if (collected.some((existing) => existing.url === page.url || existing.title === page.title)) continue;
+      collected.push(page);
+      if (collected.length >= 5) break;
+    }
+
+    if (collected.length >= 3) break;
+  }
+
+  return {
+    results: collected.slice(0, 5),
+    pageText: collected.map((result) => `${result.title}. ${result.snippet}`).join(" ").slice(0, 6000),
+    entityTitle: "",
+    entitySubtitle: "",
+    instantAnswer: ""
+  };
 }
 
 async function fetchCryptoRssResults(client, query) {
@@ -1880,6 +2684,49 @@ async function fetchCryptoRssResults(client, query) {
   return {
     results,
     pageText: results.map((result) => `${result.title}. ${result.snippet}`).join(" ").slice(0, 5000),
+    entityTitle: "",
+    entitySubtitle: "",
+    instantAnswer: ""
+  };
+}
+
+async function fetchRegistryRssResults(client, query, message, routeCategory = "") {
+  const sources = getRelevantRssSources(message, routeCategory);
+  if (!sources.length) {
+    return { results: [], pageText: "", entityTitle: "", entitySubtitle: "", instantAnswer: "" };
+  }
+
+  const settled = await Promise.allSettled(
+    sources.map(async (source) => {
+      const response = await client.get(source.url);
+      const payload = extractSearchResults(response.data, { sourceLabel: source.name });
+      return {
+        source,
+        payload
+      };
+    })
+  );
+
+  const queryAnchors = buildQueryAnchors(query);
+  const results = settled
+    .filter((entry) => entry.status === "fulfilled")
+    .flatMap((entry) => {
+      const source = entry.value.source;
+      return (entry.value.payload.results || []).map((result) => ({
+        ...result,
+        title: result.title || source.name,
+        snippet: result.snippet || ""
+      }));
+    })
+    .filter((result) => {
+      const text = [result.title, result.snippet].filter(Boolean).join(" ");
+      return !queryAnchors.length || countAnchorMatches(text, queryAnchors) >= 1;
+    })
+    .slice(0, 6);
+
+  return {
+    results,
+    pageText: results.map((result) => `${result.title}. ${result.snippet}`).join(" ").slice(0, 6000),
     entityTitle: "",
     entitySubtitle: "",
     instantAnswer: ""
@@ -1928,11 +2775,75 @@ async function withRetry(task, options = {}) {
   throw lastError || new Error("Retry failed.");
 }
 
+function finalizeToolRouteResult(result, options = {}) {
+  if (!result) return null;
+  const metadata = result && typeof result === "object" ? result._routeMeta || null : null;
+  if (!options.synthesisOnly) {
+    return metadata ? { ...result, _routeMeta: metadata } : result;
+  }
+  return {
+    name: "web.live",
+    summary: `${result.summary}\nBest extracted candidate: ${stripReplySource(result.directReply)}.`.trim(),
+    directReply: "",
+    ...(metadata ? { _routeMeta: metadata } : {})
+  };
+}
+
+function isSubstantiveToolRouteResult(result) {
+  if (!result) return false;
+  if (result?._routeMeta?.isFallback) return false;
+  if (String(result.directReply || "").trim()) return true;
+  return /Best extracted candidate:/i.test(String(result.summary || ""));
+}
+
+async function resolveCategorySources({ client, message, route, options = {} }) {
+  let fallbackCandidate = null;
+
+  for (const source of route.sources || []) {
+    let candidate = null;
+
+    if (source === "coingecko") {
+      candidate = await withRetry(() => fetchCoinGeckoCryptoPrice(client, message), { attempts: 3 }).catch(() => null);
+    } else if (source === "coingecko_historical") {
+      candidate = await withRetry(() => fetchCoinGeckoHistoricalCryptoPrice(client, message), { attempts: 3 }).catch(() => null);
+    } else if (source === "logam_mulia") {
+      candidate = await withRetry(() => fetchLogamMuliaGoldPrice(client, message), { attempts: 2 }).catch(() => null);
+    } else if (source === "yahoo_gold") {
+      candidate = await withRetry(() => fetchYahooFinanceGoldPrice(client, message), { attempts: 2 }).catch(() => null);
+    } else if (source === "pihps") {
+      candidate = await withRetry(() => fetchPihpsCommodityPrice(message), { attempts: 2 }).catch(() => null);
+    } else if (source === "panel_harga_pangan") {
+      const rawCandidate = await withRetry(() => fetchPanelHargaPanganPortal(), { attempts: 1 }).catch(() => null);
+      candidate = rawCandidate
+        ? { ...rawCandidate, _routeMeta: { source, category: route.category, isFallback: true } }
+        : null;
+    }
+
+    if (!candidate) continue;
+
+    const finalized = finalizeToolRouteResult(candidate, options);
+    if (isSubstantiveToolRouteResult(finalized)) {
+      return finalized;
+    }
+
+    if (!fallbackCandidate) {
+      fallbackCandidate = finalized;
+    }
+  }
+
+  return fallbackCandidate;
+}
+
 async function runSingleWebLiveLookup(message, options = {}) {
   const secondHop = Boolean(options.secondHop);
   const liveIntent = detectLiveIntent(message);
-  if (!liveIntent.shouldLookup) {
+  const forceLookup = Boolean(options.forceLookup || options.categoryHint);
+  if (!liveIntent.shouldLookup && !forceLookup) {
     throw new Error("No live lookup needed for this message.");
+  }
+
+  if (shouldFetchDirectUrl(message)) {
+    return fetchDirectUrlContent(message);
   }
 
   const client = axios.create({
@@ -1945,36 +2856,40 @@ async function runSingleWebLiveLookup(message, options = {}) {
     }
   });
 
-  const queryKind = classifyLiveIntent(message);
-  if (queryKind === "price" && isCryptoQuery(message)) {
-    const cryptoCandidate = await withRetry(() => fetchCoinGeckoCryptoPrice(client, message), { attempts: 3 })
-      .catch(() => null);
-    if (cryptoCandidate) {
-      if (options.synthesisOnly) {
-        return {
-          name: "web.live",
-          summary: `${cryptoCandidate.summary}\nBest extracted candidate: ${stripReplySource(cryptoCandidate.directReply)}.`,
-          directReply: ""
-        };
-      }
-      return cryptoCandidate;
-    }
+  const route = resolveLiveRoute(message, options);
+  const queryKind = route.intent;
+  const routeCandidate = await resolveCategorySources({ client, message, route, options });
+  if (isSubstantiveToolRouteResult(routeCandidate)) {
+    return routeCandidate;
   }
 
-  const queries = secondHop
-    ? buildSecondHopSearchQueries(message, queryKind)
-    : [buildSearchQuery(message), buildFallbackSearchQuery(message, queryKind)];
+  // Use LLM-generated query if provided (authoritative), fallback to built queries
+  const overrideQuery = String(options.overrideQuery || "").trim();
+  const queries = overrideQuery
+    ? [overrideQuery, ...buildSecondHopSearchQueries(message, queryKind)]
+    : secondHop
+      ? buildSecondHopSearchQueries(message, queryKind)
+      : [buildSearchQuery(message), buildFallbackSearchQuery(message, queryKind)];
 
   let selectedQuery = "";
   let searchPayload = null;
   for (const query of queries) {
     const googlePayload = await withRetry(() => fetchSearchResults(client, query), { attempts: 3 });
-    const cryptoPayload = isCryptoQuery(message)
+    const registryPayload = route.sources.includes("registry_rss")
+      ? await withRetry(() => fetchRegistryRssResults(client, query, message, route.category), { attempts: 2 }).catch(() => null)
+      : null;
+    const cryptoPayload = route.sources.includes("crypto_rss")
       ? await withRetry(() => fetchCryptoRssResults(client, query), { attempts: 3 })
       : null;
-    const payload = cryptoPayload
-      ? mergeSearchPayloads(googlePayload, cryptoPayload)
-      : googlePayload;
+    const wikipediaPayload = route.sources.includes("wikipedia")
+      ? await withRetry(() => fetchWikipediaResults(client, query), { attempts: 2 }).catch(() => null)
+      : null;
+    const payload = mergeSearchPayloads(...orderSearchPayloadsForCategory(route.category, {
+      google: googlePayload,
+      registry: registryPayload,
+      crypto: cryptoPayload,
+      wikipedia: wikipediaPayload
+    }));
     if (payload.results.length) {
       selectedQuery = query;
       searchPayload = payload;
@@ -1983,12 +2898,18 @@ async function runSingleWebLiveLookup(message, options = {}) {
   }
 
   if (!searchPayload?.results?.length) {
-    throw new Error("No live web results found.");
+    if (routeCandidate) return routeCandidate;
+    return {
+      name: "web.live",
+      summary: `No live web results found for historical-aware query: ${buildSearchQuery(message)}.`,
+      directReply: options.synthesisOnly ? "" : buildInconclusiveReply(message, queryKind),
+      engine: { score: 0, evidence: [] }
+    };
   }
 
   const results = searchPayload.results;
-  const cardCandidate = extractFromSearchSummary(message, queryKind, selectedQuery, searchPayload);
-  const resultsCandidate = extractFromSearchResults(message, queryKind, results, searchPayload, selectedQuery);
+  const cardCandidate = extractFromSearchSummary(message, queryKind, selectedQuery, searchPayload, { routeCategory: route.category });
+  const resultsCandidate = extractFromSearchResults(message, queryKind, results, searchPayload, selectedQuery, { routeCategory: route.category });
   return decideLiveOutcome(message, queryKind, selectedQuery, searchPayload, [cardCandidate, resultsCandidate], {
     secondHop,
     synthesisOnly: Boolean(options.synthesisOnly)

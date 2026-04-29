@@ -138,6 +138,21 @@ function stripAssistantArtifacts(text) {
     .trim();
 }
 
+function looksLikeLeakedInternalOutput(text = "") {
+  const value = String(text || "").trim();
+  if (!value) return false;
+  if (/^thinking\b/i.test(value)) return true;
+  if (/^the user wants to\b/i.test(value)) return true;
+  if (/\{\s*"id"\s*:\s*"?[\w-]+"?[\s\S]*"(?:url|query|source|cursor)"\s*:/i.test(value)) return true;
+  if (/\b(?:use tool|call browse|call web|request browsing|let'?s fetch|need to use the tool)\b/i.test(value)) return true;
+  return false;
+}
+
+async function runProviderRound({ provider, model, messages, mode, attempts = 3 }) {
+  const streamResponse = await openProviderStreamWithRetry({ provider, model, messages, mode, attempts });
+  return collectProviderStream(streamResponse, provider, model);
+}
+
 function normalizeProvider(provider) {
   return PROVIDER_DEFAULTS[provider] ? provider : "ollama";
 }
@@ -199,14 +214,18 @@ function buildDeepSurfInstruction(surfaceMode) {
     ? [
         "You are in Deep Surf Beta mode.",
         "First decide whether the user asks for stable knowledge or current/live information.",
-        "For current facts, prices, leaders, news, or market data, use the web search results from this turn as evidence.",
-        "Compare the search results with your knowledge and answer only what is supported.",
-        "For current office holders or leaders, never answer from memory if the web evidence does not support the name.",
-        "For public-person family or relationship facts such as spouse, children, parents, or family, never invent names; answer only from evidence in the web results or say the result is not clear.",
+        "If the question is about current facts, prices, leaders, news, schedules, status, or market data, rely on the live tool results from this turn before answering.",
+        "Treat the tool results as retrieval context: identify the strongest matching evidence, then summarize it clearly for the user.",
+        "If a webpage was fetched this turn, use that fetched page content to perform the user's requested task (for example summarize, audit, compare, extract key points, or judge credibility), instead of echoing raw snippets.",
+        "Do not require the user to phrase requests in a special format. Infer the likely intent naturally from short casual queries.",
+        "When the evidence is mixed, prefer the most directly relevant and freshest-looking result, and mention uncertainty briefly instead of inventing precision.",
+        "For current office holders or leaders, never answer from memory if the live evidence does not support the name.",
+        "For public-person family or relationship facts such as spouse, children, parents, or family, never invent names; answer only from evidence in the live results or say the result is not clear.",
         "If your memory conflicts with current-date evidence, prefer the current-date evidence.",
         "If the search results are weak, conflicting, or unrelated, say that the current data is not clear and avoid inventing numbers or names.",
         "Do not mention Google News, Google RSS, or internal query providers in the final answer.",
-        "Only include a source line if the search result text clearly names a concrete publisher or official source."
+        "Only include a source line if the evidence clearly names a concrete publisher, official source, or market source.",
+        "Write the final answer naturally and directly, not like an internal report."
       ].join("\n")
     : "";
 }
@@ -304,7 +323,8 @@ async function generateAssistantReply({
 
   const responseStartedAt = Date.now();
   const { toolContext, directReply } = await resolveToolContext(cleanMessage, { surfaceMode: resolvedSurfaceMode, session });
-  if (directReply) {
+  // Only redirect for surface-mode routing decisions (not tool results)
+  if (directReply && !toolContext) {
     const doneAt = new Date().toISOString();
     const responseMs = Math.max(0, Date.now() - responseStartedAt);
     session.updatedAt = doneAt;
@@ -323,14 +343,33 @@ async function generateAssistantReply({
     [buildDeepSurfInstruction(resolvedSurfaceMode), toolContext].filter(Boolean).join("\n\n")
   );
   const providerMessages = buildProviderMessages(session, systemText, resolvedProvider);
-  const streamResponse = await openProviderStreamWithRetry({
+  let reply = await runProviderRound({
     provider: resolvedProvider,
     model: resolvedModel,
     messages: providerMessages,
     mode: resolvedMode,
     attempts: 3
   });
-  const reply = await collectProviderStream(streamResponse, resolvedProvider, resolvedModel);
+  if (looksLikeLeakedInternalOutput(reply.content || reply.reasoning)) {
+    const recoverySystemText = buildSystem(
+      resolvedMode,
+      [
+        buildDeepSurfInstruction(resolvedSurfaceMode),
+        toolContext,
+        "Do not reveal chain-of-thought, internal planning, JSON tool calls, or pseudo tool requests.",
+        "If you need web/tool data, assume the system already handled the tool step internally for you when relevant.",
+        "Return only the final user-facing answer."
+      ].filter(Boolean).join("\n\n")
+    );
+    const recoveryMessages = buildProviderMessages(session, recoverySystemText, resolvedProvider);
+    reply = await runProviderRound({
+      provider: resolvedProvider,
+      model: resolvedModel,
+      messages: recoveryMessages,
+      mode: resolvedMode,
+      attempts: 2
+    });
+  }
   const doneAt = new Date().toISOString();
   const responseMs = Math.max(0, Date.now() - responseStartedAt);
   session.updatedAt = doneAt;
@@ -417,7 +456,8 @@ async function handleChatStream(req, res) {
   };
 
   const { toolContext, directReply } = await resolveToolContext(message, { surfaceMode, session });
-  if (directReply) {
+  // Only redirect for surface-mode routing decisions (not tool results)
+  if (directReply && !toolContext) {
     finishSession(directReply, model);
     return;
   }
@@ -475,15 +515,21 @@ async function handleChatStream(req, res) {
 
           if (reasoningChunk) {
             fullReasoning += reasoningChunk;
-            res.write(`data: ${JSON.stringify({ reasoning: reasoningChunk })}\n\n`);
+            if (!looksLikeLeakedInternalOutput(reasoningChunk)) {
+              res.write(`data: ${JSON.stringify({ reasoning: reasoningChunk })}\n\n`);
+            }
           }
           if (parsedToken.reasoning) {
             fullReasoning += parsedToken.reasoning;
-            res.write(`data: ${JSON.stringify({ reasoning: parsedToken.reasoning })}\n\n`);
+            if (!looksLikeLeakedInternalOutput(parsedToken.reasoning)) {
+              res.write(`data: ${JSON.stringify({ reasoning: parsedToken.reasoning })}\n\n`);
+            }
           }
           if (parsedToken.content) {
             fullReply += parsedToken.content;
-            res.write(`data: ${JSON.stringify({ token: parsedToken.content })}\n\n`);
+            if (!looksLikeLeakedInternalOutput(parsedToken.content) && !looksLikeLeakedInternalOutput(fullReply)) {
+              res.write(`data: ${JSON.stringify({ token: parsedToken.content })}\n\n`);
+            }
           }
 
           const finished = isSse ? parsed?.choices?.[0]?.finish_reason : parsed?.done;
@@ -491,6 +537,33 @@ async function handleChatStream(req, res) {
             const leftover = flushThinkParser(thinkParser);
             if (leftover.reasoning) fullReasoning += leftover.reasoning;
             if (leftover.content) fullReply += leftover.content;
+            if (looksLikeLeakedInternalOutput(fullReply || fullReasoning)) {
+              cleanupActiveStream();
+              providerStream?.destroy?.();
+              (async () => {
+                try {
+                  const recoverySystemText = buildSystem(mode, [
+                    deepSurfInstruction,
+                    toolContext,
+                    "Do not reveal chain-of-thought, internal planning, JSON tool calls, or pseudo tool requests.",
+                    "If you need web/tool data, assume the system already handled the tool step internally for you when relevant.",
+                    "Return only the final user-facing answer."
+                  ].filter(Boolean).join("\n\n"));
+                  const recoveryMessages = buildProviderMessages(session, recoverySystemText, resolvedProvider);
+                  const recoveryReply = await runProviderRound({
+                    provider: resolvedProvider,
+                    model,
+                    messages: recoveryMessages,
+                    mode,
+                    attempts: 2
+                  });
+                  finishSession(recoveryReply.content || "", recoveryReply.model || model, recoveryReply.reasoning || "");
+                } catch (err) {
+                  writeChatError(res, "Jawaban model bocor ke mode internal. Coba kirim ulang ya.");
+                }
+              })();
+              return;
+            }
             finishSession(fullReply, parsed.model || model, fullReasoning);
           }
         } catch (_err) {}

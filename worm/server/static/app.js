@@ -11,10 +11,17 @@ const workspaceSelect = document.getElementById('workspaceSelect');
 const workspaceTitleSide = document.getElementById('workspaceTitleSide');
 const messageInput = document.getElementById('messageInput');
 const healthText = document.getElementById('healthText');
+const healthTextMobile = document.getElementById('healthTextMobile');
 const statusDot = document.getElementById('statusDot');
+const statusDotMobile = document.getElementById('statusDotMobile');
+const sidebarScrim = document.getElementById('sidebarScrim');
 const chatList = document.getElementById('chatList');
 const sendBtn = document.getElementById('sendBtn');
 const selectionToast = document.getElementById('selectionToast');
+const composerSettings = document.getElementById('composerSettings');
+const composerSettingsToggle = document.getElementById('composerSettingsToggle');
+const composerSettingsPanel = document.getElementById('composerSettingsPanel');
+const composerSettingsValue = document.getElementById('composerSettingsValue');
 const sessionSetupModal = document.getElementById('sessionSetupModal');
 const sessionSetupProvider = document.getElementById('sessionSetupProvider');
 const sessionSetupModel = document.getElementById('sessionSetupModel');
@@ -35,6 +42,11 @@ let currentSurfaceMode = DEFAULT_SURFACE_MODE;
 let startupGatewayActive = true;
 let startupActivationPromise = null;
 
+function setStatusUi(className, text) {
+  [statusDot, statusDotMobile].filter(Boolean).forEach((el) => { el.className = className; });
+  [healthText, healthTextMobile].filter(Boolean).forEach((el) => { el.textContent = text; });
+}
+
 function escapeHtml(str) {
   return String(str || '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -50,6 +62,28 @@ function inlineFormat(line) {
   return line;
 }
 
+function mergeOrderedListDescriptions(text = '') {
+  const lines = String(text || '').split('\n');
+  const merged = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = lines[index];
+    const next = lines[index + 1] || '';
+    const currentIsOrdered = /^\s*\d+\.\s+\S/.test(current);
+    const nextIsBullet = /^\s*[-*]\s+\S/.test(next);
+
+    if (currentIsOrdered && nextIsBullet) {
+      merged.push(`${current} — ${next.replace(/^\s*[-*]\s+/, '')}`);
+      index += 1;
+      continue;
+    }
+
+    merged.push(current);
+  }
+
+  return merged.join('\n');
+}
+
 function renderMarkdown(raw) {
   if (!raw) return '';
   const cb = [];
@@ -59,7 +93,7 @@ function renderMarkdown(raw) {
     cb.push(`<div class="code-block"><div class="code-lang">${label}</div><code>${escapeHtml(code.replace(/\n$/, ''))}</code></div>`);
     return `\x00CB${i}\x00`;
   });
-  text = renumberRepeatedOrderedItems(text);
+  text = mergeOrderedListDescriptions(renumberRepeatedOrderedItems(text));
   const lines = text.split('\n');
   const out = [];
   let inUl = false;
@@ -244,14 +278,35 @@ function formatResponseTime(ms) {
   return `${(value / 1000).toFixed(0)} s`;
 }
 
-function buildAnswerMeta(source = '', responseMs = null) {
+function extractEvidenceLine(content = "") {
+  const match = String(content || "").match(/(?:^|\n)Evidence:\s*(.+?)(?:\n|$)/i);
+  return match ? match[1].trim() : "";
+}
+
+function extractEngineScore(content = "") {
+  const match = String(content || "").match(/(?:^|\n)Score:\s*(\d{1,3})(?:\n|$)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function stripEvidenceAndScore(content = "") {
+  return String(content || "")
+    .replace(/(?:^|\n)Evidence:\s*.+?(?=\n|$)/gi, "")
+    .replace(/(?:^|\n)Score:\s*\d{1,3}(?=\n|$)/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function buildAnswerMeta(source = '', responseMs = null, score = null) {
   const items = [];
   if (source) {
     items.push(`<span class="answer-source">Sumber: ${escapeHtml(source)}</span>`);
   }
   const timing = formatResponseTime(responseMs);
   if (timing) {
-    items.push(`<span class="answer-time">Response time: ${escapeHtml(timing)}</span>`);
+    items.push(`<span class="answer-time">${escapeHtml(timing)}</span>`);
+  }
+  if (Number.isFinite(score)) {
+    items.push(`<span class="answer-score">score ${escapeHtml(String(score))}</span>`);
   }
   if (!items.length) return '';
   return `<div class="answer-meta">${items.join('<span class="answer-meta-sep">·</span>')}</div>`;
@@ -260,16 +315,20 @@ function buildAnswerMeta(source = '', responseMs = null) {
 function renderAnswerWithSource(raw = '', options = {}) {
   const { responseMs = null } = options;
   const parsed = extractAnswerSource(normalizeDisplayAnswer(raw));
-  const answerHtml = parsed.content
-    ? renderMarkdown(parsed.content)
+  const evidence = extractEvidenceLine(parsed.content);
+  const score = extractEngineScore(parsed.content);
+  const cleanContent = stripEvidenceAndScore(parsed.content);
+  const answerHtml = cleanContent
+    ? renderMarkdown(cleanContent)
     : '';
-  const metaHtml = buildAnswerMeta(parsed.source, responseMs);
+  const evidenceHtml = evidence ? `<div class="answer-evidence">Evidence: ${escapeHtml(evidence)}</div>` : '';
+  const metaHtml = buildAnswerMeta(parsed.source, responseMs, score);
 
-  if (!answerHtml && !metaHtml) {
+  if (!answerHtml && !evidenceHtml && !metaHtml) {
     return '<div class="answer-block empty">No reply.</div>';
   }
 
-  return `<div class="answer-block${!answerHtml ? ' empty' : ''}">${answerHtml || ''}${metaHtml}</div>`;
+  return `<div class="answer-block${!answerHtml ? ' empty' : ''}">${answerHtml || ''}${evidenceHtml}${metaHtml}</div>`;
 }
 
 function renderFriendlyError(target, message, responseMs = null) {
@@ -367,6 +426,24 @@ function showSelectionToast(message) {
   }, 1800);
 }
 
+function formatModelLabel(model = '') {
+  const value = String(model || '').trim();
+  if (!value) return 'Select model';
+  return value.replace(/^[^/]+\//, '');
+}
+
+function updateComposerSettingsSummary() {
+  if (!composerSettingsValue) return;
+  composerSettingsValue.textContent = formatModelLabel(modelSelect.value);
+}
+
+function setComposerSettingsOpen(open) {
+  if (!composerSettings || !composerSettingsToggle || !composerSettingsPanel) return;
+  composerSettings.classList.toggle('open', open);
+  composerSettingsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  composerSettingsPanel.hidden = !open;
+}
+
 async function populateModelSelect(provider, targetSelect, preferredModel = '', options = {}) {
   const {
     showLoading = false,
@@ -388,7 +465,7 @@ async function populateModelSelect(provider, targetSelect, preferredModel = '', 
     models.forEach((model) => {
       const option = document.createElement('option');
       option.value = model;
-      option.textContent = model;
+      option.textContent = formatModelLabel(model);
       if (model === (preferredModel || data.defaultModel)) option.selected = true;
       targetSelect.appendChild(option);
     });
@@ -396,23 +473,24 @@ async function populateModelSelect(provider, targetSelect, preferredModel = '', 
     if (preferredModel && !models.includes(preferredModel)) {
       const option = document.createElement('option');
       option.value = preferredModel;
-      option.textContent = preferredModel;
+      option.textContent = formatModelLabel(preferredModel);
       option.selected = true;
       targetSelect.appendChild(option);
     }
   } catch {
     const fallbackModel = provider === 'nvidia' ? 'stepfun-ai/step-3.5-flash' : 'qwen2.5-coder:3b';
-    targetSelect.innerHTML = `<option value="${fallbackModel}">${fallbackModel}</option>`;
+    targetSelect.innerHTML = `<option value="${fallbackModel}">${formatModelLabel(fallbackModel)}</option>`;
     if (preferredModel && preferredModel !== fallbackModel) {
       const option = document.createElement('option');
       option.value = preferredModel;
-      option.textContent = preferredModel;
+      option.textContent = formatModelLabel(preferredModel);
       option.selected = true;
       targetSelect.appendChild(option);
     } else {
       targetSelect.value = preferredModel || fallbackModel;
     }
   } finally {
+    if (targetSelect === modelSelect) updateComposerSettingsSummary();
     if (showLoading) {
       setLoadingDialog(false);
     }
@@ -746,10 +824,11 @@ async function syncSessionControls(session) {
   if (session?.model && ![...modelSelect.options].some((option) => option.value === session.model)) {
     const option = document.createElement('option');
     option.value = session.model;
-    option.textContent = session.model;
+    option.textContent = formatModelLabel(session.model);
     modelSelect.appendChild(option);
   }
   if (session?.model) modelSelect.value = session.model;
+  updateComposerSettingsSummary();
 }
 
 function refreshSessionControlsBackground(session) {
@@ -882,8 +961,7 @@ function enterStartupGateway() {
   activeSession = null;
   abortActiveStream();
   closeStoredStreamOnStartup();
-  statusDot.className = 'status-dot idle';
-  healthText.textContent = 'Idle';
+  setStatusUi('status-dot idle', 'Idle');
 }
 
 async function activateStartupGateway() {
@@ -928,18 +1006,14 @@ async function loadHealth() {
       ? data.providers.find((provider) => provider.id === selectedProvider)
       : null;
     if (selectedState?.ok) {
-      statusDot.className = 'status-dot';
-      healthText.textContent = `${formatProviderLabel(selectedProvider)} ready`;
+      setStatusUi('status-dot', `${formatProviderLabel(selectedProvider)} ready`);
     } else if (data.ok) {
-      statusDot.className = 'status-dot idle';
-      healthText.textContent = `${formatProviderLabel(selectedProvider)} unavailable`;
+      setStatusUi('status-dot idle', `${formatProviderLabel(selectedProvider)} unavailable`);
     } else {
-      statusDot.className = 'status-dot err';
-      healthText.textContent = `${formatProviderLabel(selectedProvider)} error`;
+      setStatusUi('status-dot err', `${formatProviderLabel(selectedProvider)} error`);
     }
   } catch {
-    statusDot.className = 'status-dot err';
-    healthText.textContent = 'Offline';
+    setStatusUi('status-dot err', 'Offline');
   }
 }
 
@@ -1148,6 +1222,7 @@ async function handleNewChatRequest() {
 
 document.getElementById('collapseBtn').addEventListener('click', () => toggleSidebar());
 document.getElementById('mobileMenuBtn').addEventListener('click', () => toggleSidebar(true));
+sidebarScrim?.addEventListener('click', () => toggleSidebar(false));
 document.getElementById('newChatBtn').addEventListener('click', handleNewChatRequest);
 document.getElementById('newChatBtnCollapsed').addEventListener('click', handleNewChatRequest);
 themeLightBtn?.addEventListener('click', () => applyTheme('light'));
@@ -1169,22 +1244,40 @@ workspaceSelect.addEventListener('change', () => {
 
 providerSelect.addEventListener('change', async () => {
   stopActiveStreamForControlChange('Stream dihentikan karena provider diganti.');
+  updateComposerSettingsSummary();
   await activateStartupGateway();
   await loadModels();
-  statusDot.className = 'status-dot idle';
-  healthText.textContent = `Checking ${formatProviderLabel(providerSelect.value)}...`;
+  setStatusUi('status-dot idle', `Checking ${formatProviderLabel(providerSelect.value)}...`);
   showSelectionToast(`Provider set to ${formatProviderLabel(providerSelect.value)}.`);
   setTimeout(() => loadHealth(), 300);
 });
 
 modelSelect.addEventListener('change', () => {
   if (!modelSelect.value) return;
+  updateComposerSettingsSummary();
   stopActiveStreamForControlChange('Stream dihentikan karena model diganti.');
-  showSelectionToast(`Model set to ${modelSelect.value}.`);
+  showSelectionToast(`Model set to ${formatModelLabel(modelSelect.value)}.`);
 });
 
 modeSelect.addEventListener('change', () => {
   stopActiveStreamForControlChange('Stream dihentikan karena think level diganti.');
+});
+
+composerSettingsToggle?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setComposerSettingsOpen(composerSettingsPanel.hidden);
+});
+
+composerSettingsPanel?.addEventListener('click', (e) => {
+  e.stopPropagation();
+});
+
+document.addEventListener('pointerdown', (e) => {
+  if (!composerSettings?.contains(e.target)) setComposerSettingsOpen(false);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') setComposerSettingsOpen(false);
 });
 
 messageInput.addEventListener('keydown', (e) => {
@@ -1201,8 +1294,12 @@ messageInput.addEventListener('input', () => {
 });
 
 syncCollapsedNewBtn();
+updateComposerSettingsSummary();
 applyTheme(loadStoredTheme(), { silent: true });
 applySurfaceMode(DEFAULT_SURFACE_MODE, { silent: true });
 enterStartupGateway();
 window.addEventListener('pointerdown', () => activateStartupGateway(), { once: true, capture: true });
 window.addEventListener('keydown', () => activateStartupGateway(), { once: true, capture: true });
+window.addEventListener('resize', () => {
+  if (window.innerWidth > 780) body.classList.remove('sidebar-open');
+});

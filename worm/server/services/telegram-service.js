@@ -13,7 +13,7 @@ const {
   TELEGRAM_SURFACE_MODE
 } = require("../config");
 const { describeError } = require("../utils/errors");
-const { defaultModelFor } = require("./provider-service");
+const { defaultModelFor, getProviderModels, isProviderConfigured } = require("./provider-service");
 const { generateAssistantReply } = require("./chat-service");
 const {
   createSession,
@@ -50,38 +50,86 @@ function resolveTelegramProvider() {
   return TELEGRAM_PROVIDER === "nvidia" ? "nvidia" : "ollama";
 }
 
+function providerLabelToKey(label = "") {
+  const text = String(label || "").trim().toLowerCase();
+  if (text === "cloud") return "nvidia";
+  if (text === "local") return "ollama";
+  return "";
+}
+
+function providerKeyToLabel(provider = "") {
+  return provider === "nvidia" ? "Cloud" : "Local";
+}
+
 function resolveTelegramModel(provider) {
   return TELEGRAM_MODEL || defaultModelFor(provider);
 }
 
-function setTelegramSession(chatId, session) {
+function getTelegramChatRecord(chatId) {
   const index = readTelegramIndex();
-  index.chats[String(chatId)] = {
+  const key = String(chatId);
+  return {
+    index,
+    key,
+    record: index.chats[key] || {}
+  };
+}
+
+function updateTelegramChatRecord(chatId, updater) {
+  const { index, key, record } = getTelegramChatRecord(chatId);
+  index.chats[key] = updater({ ...record }) || record;
+  writeTelegramIndex(index);
+  return index.chats[key];
+}
+
+function getTelegramPreferences(chatId) {
+  const { record } = getTelegramChatRecord(chatId);
+  const provider = record.provider || resolveTelegramProvider();
+  const model = record.model || resolveTelegramModel(provider);
+  return { provider, model };
+}
+
+function setTelegramPreferences(chatId, preferences = {}) {
+  return updateTelegramChatRecord(chatId, (record) => ({
+    ...record,
+    ...(preferences.provider ? { provider: preferences.provider } : {}),
+    ...(preferences.model ? { model: preferences.model } : {}),
+    updatedAt: new Date().toISOString()
+  }));
+}
+
+function setTelegramSession(chatId, session) {
+  updateTelegramChatRecord(chatId, (record) => ({
+    ...record,
     sessionId: session.id,
     token: session.token,
     updatedAt: new Date().toISOString()
-  };
-  writeTelegramIndex(index);
+  }));
 }
 
 function clearTelegramSession(chatId) {
-  const index = readTelegramIndex();
-  delete index.chats[String(chatId)];
-  writeTelegramIndex(index);
+  updateTelegramChatRecord(chatId, (record) => {
+    delete record.sessionId;
+    delete record.token;
+    record.updatedAt = new Date().toISOString();
+    return record;
+  });
 }
 
 function getTelegramSession(chatId) {
-  const key = String(chatId);
-  const index = readTelegramIndex();
-  const saved = index.chats[key];
+  const { key, record: saved } = getTelegramChatRecord(chatId);
+  const preferences = getTelegramPreferences(chatId);
   let session = saved ? verifySession(saved.sessionId, saved.token) : null;
 
+  if (session && (session.provider !== preferences.provider || session.model !== preferences.model)) {
+    session = null;
+  }
+
   if (!session) {
-    const provider = resolveTelegramProvider();
     session = createSession({
       workspace: "Telegram",
-      provider,
-      model: resolveTelegramModel(provider),
+      provider: preferences.provider,
+      model: preferences.model,
       surfaceMode: TELEGRAM_SURFACE_MODE
     });
     session.title = `Telegram ${key}`;
@@ -113,10 +161,47 @@ async function sendTelegramMessage(chatId, text) {
   }
 }
 
+async function sendTelegramMenu(chatId, text, keyboardRows = []) {
+  await telegramPost("sendMessage", {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true,
+    reply_markup: {
+      keyboard: keyboardRows.map((row) => row.map((label) => ({ text: label }))),
+      resize_keyboard: true,
+      one_time_keyboard: true
+    }
+  });
+}
+
 async function sendTyping(chatId) {
   try {
     await telegramPost("sendChatAction", { chat_id: chatId, action: "typing" });
   } catch (_err) {}
+}
+
+function startTypingKeepalive(chatId, options = {}) {
+  const intervalMs = Math.max(3000, Number(options.intervalMs || 4500));
+  let stopped = false;
+  let timer = null;
+
+  const tick = async () => {
+    if (stopped) return;
+    await sendTyping(chatId);
+  };
+
+  tick();
+  timer = setInterval(() => {
+    tick();
+  }, intervalMs);
+
+  return () => {
+    stopped = true;
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
 }
 
 function splitTelegramText(text) {
@@ -140,6 +225,59 @@ function buildTelegramReply(reply) {
   return [`Thinking:\n${reasoning}`, content].join("\n\n---\n\n");
 }
 
+async function sendProviderMenu(chatId) {
+  const { provider, model } = getTelegramPreferences(chatId);
+  await sendTelegramMenu(
+    chatId,
+    `Provider aktif: ${providerKeyToLabel(provider)}\nModel aktif: ${model}\n\nPilih provider:`,
+    [["Local", "Cloud"]]
+  );
+}
+
+async function sendModelMenu(chatId) {
+  const { provider, model } = getTelegramPreferences(chatId);
+  if (!isProviderConfigured(provider)) {
+    await sendTelegramMessage(chatId, `Provider ${providerKeyToLabel(provider)} belum siap.`);
+    return;
+  }
+
+  const models = await getProviderModels(provider).catch(() => []);
+  const available = models.length ? models : [defaultModelFor(provider)];
+  const rows = [];
+  for (let i = 0; i < available.length; i += 2) {
+    rows.push(available.slice(i, i + 2));
+  }
+  await sendTelegramMenu(
+    chatId,
+    `Provider: ${providerKeyToLabel(provider)}\nModel aktif: ${model}\n\nPilih model:`,
+    rows.slice(0, 12)
+  );
+}
+
+async function tryHandleTelegramProviderSelection(chatId, text) {
+  const provider = providerLabelToKey(text);
+  if (!provider) return false;
+  const model = defaultModelFor(provider);
+  setTelegramPreferences(chatId, { provider, model });
+  clearTelegramSession(chatId);
+  await sendTelegramMessage(chatId, `Sip, provider Telegram sekarang ${providerKeyToLabel(provider)}. Model default: ${model}.`);
+  await sendModelMenu(chatId);
+  return true;
+}
+
+async function tryHandleTelegramModelSelection(chatId, text) {
+  const value = String(text || "").trim();
+  if (!value || value.startsWith("/")) return false;
+  const { provider } = getTelegramPreferences(chatId);
+  const models = await getProviderModels(provider).catch(() => []);
+  const available = new Set((models.length ? models : [defaultModelFor(provider)]).map((item) => String(item).trim()));
+  if (!available.has(value)) return false;
+  setTelegramPreferences(chatId, { model: value });
+  clearTelegramSession(chatId);
+  await sendTelegramMessage(chatId, `Oke, model Telegram sekarang ${value} (${providerKeyToLabel(provider)}).`);
+  return true;
+}
+
 async function handleTelegramMessage(message) {
   const chatId = message?.chat?.id;
   const text = String(message?.text || "").trim();
@@ -156,10 +294,34 @@ async function handleTelegramMessage(message) {
     return;
   }
 
-  const provider = resolveTelegramProvider();
-  const model = resolveTelegramModel(provider);
+  if (text === "/provider") {
+    await sendProviderMenu(chatId);
+    return;
+  }
+
+  if (text === "/model") {
+    await sendModelMenu(chatId);
+    return;
+  }
+
+  if (text === "/status") {
+    const { provider, model } = getTelegramPreferences(chatId);
+    await sendTelegramMessage(chatId, `Telegram sekarang pakai ${providerKeyToLabel(provider)} · ${model}`);
+    return;
+  }
+
+  if (await tryHandleTelegramProviderSelection(chatId, text)) return;
+  if (await tryHandleTelegramModelSelection(chatId, text)) return;
+
+  const { provider, model } = getTelegramPreferences(chatId);
   const session = getTelegramSession(chatId);
-  await sendTyping(chatId);
+  const isReasoningFlow = String(TELEGRAM_SURFACE_MODE || "").trim().toLowerCase() === "deep_surf";
+  const stopTyping = isReasoningFlow
+    ? startTypingKeepalive(chatId)
+    : (() => {
+        sendTyping(chatId);
+        return () => {};
+      })();
 
   try {
     const reply = await generateAssistantReply({
@@ -173,10 +335,14 @@ async function handleTelegramMessage(message) {
       token: session.token
     });
     setTelegramSession(chatId, reply.session);
+    stopTyping();
     await sendTelegramMessage(chatId, buildTelegramReply(reply));
   } catch (err) {
+    stopTyping();
     console.error(`[telegram] chat ${chatId}:`, describeError(err, "Telegram reply failed"));
     await sendTelegramMessage(chatId, "Ada kendala saat memproses pesan. Bisa coba kirim ulang?");
+  } finally {
+    stopTyping();
   }
 }
 

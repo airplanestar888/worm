@@ -11,8 +11,15 @@ const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
 const NVIDIA_MODEL = process.env.NVIDIA_MODEL || "stepfun-ai/step-3.5-flash";
 const NVIDIA_CONTEXT_TOKENS = Number(process.env.NVIDIA_CONTEXT_TOKENS || 64000);
 const GOOGLE_NEWS_RSS_URL = process.env.GOOGLE_NEWS_RSS_URL || "https://news.google.com/rss/search";
+const JINA_BASE_URL = process.env.JINA_BASE_URL || "https://r.jina.ai/http://";
+const JINA_API_KEY = process.env.JINA_API_KEY || "";
 const COINGECKO_SIMPLE_PRICE_URL = process.env.COINGECKO_SIMPLE_PRICE_URL || "https://api.coingecko.com/api/v3/simple/price";
 const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY || "";
+const LOGAM_MULIA_PRICE_URL = process.env.LOGAM_MULIA_PRICE_URL || "https://www.logammulia.com/id/harga-emas-hari-ini";
+const YAHOO_FINANCE_GOLD_URL = process.env.YAHOO_FINANCE_GOLD_URL || "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d&range=1d";
+const PIHPS_PAGE_URL = process.env.PIHPS_PAGE_URL || "https://www.bi.go.id/hargapangan";
+const PIHPS_CHART_URL = process.env.PIHPS_CHART_URL || "https://www.bi.go.id/hargapangan/WebSite/Home/GetChartData";
+const PANEL_HARGA_PANGAN_URL = process.env.PANEL_HARGA_PANGAN_URL || "https://panelharga.badanpangan.go.id/";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_PROVIDER = String(process.env.TELEGRAM_PROVIDER || "nvidia").trim().toLowerCase();
 const TELEGRAM_MODEL = process.env.TELEGRAM_MODEL || "";
@@ -26,6 +33,40 @@ const CRYPTO_RSS_URLS = String(process.env.CRYPTO_RSS_URLS || [
   .split(",")
   .map((url) => url.trim())
   .filter(Boolean);
+const LIVE_RSS_SOURCE_REGISTRY = [
+  { name: "ANTARA Top News", category: "general", language: "id", priority: 100, tier: "A", url: "https://www.antaranews.com/rss/top-news" },
+  { name: "Kompas Nasional", category: "general", language: "id", priority: 96, tier: "A", url: "https://www.kompas.com/getrss/nasional" },
+  { name: "BBC Indonesia", category: "general", language: "id", priority: 92, tier: "A", url: "https://feeds.bbci.co.uk/indonesian/rss.xml" },
+  { name: "ANTARA Semua", category: "general", language: "id", priority: 86, tier: "B", url: "https://www.antaranews.com/rss" },
+  { name: "VOA Indonesia", category: "general", language: "id", priority: 82, tier: "B", url: "https://www.voaindonesia.com/api/zo_oe_qgt" },
+  { name: "Kontan", category: "economy", language: "id", priority: 100, tier: "A", url: "https://www.kontan.co.id/feed" },
+  { name: "ANTARA Ekonomi", category: "economy", language: "id", priority: 95, tier: "A", url: "https://www.antaranews.com/rss/ekonomi" },
+  { name: "Bola.com", category: "sports", language: "id", priority: 100, tier: "A", url: "https://www.bola.com/feed" },
+  { name: "Okezone Sports", category: "sports", language: "id", priority: 86, tier: "B", url: "https://sports.okezone.com/feed/rss" },
+  { name: "VOA Indonesia Olahraga", category: "sports", language: "id", priority: 82, tier: "B", url: "https://www.voaindonesia.com/api/zo-olahraga" },
+  { name: "DetikInet", category: "technology", language: "id", priority: 100, tier: "A", url: "https://rss.detik.com/index.php/inet" },
+  { name: "Kompas Tekno", category: "technology", language: "id", priority: 96, tier: "A", url: "https://tekno.kompas.com/feed" },
+  { name: "ANTARA Teknologi", category: "technology", language: "id", priority: 94, tier: "A", url: "https://www.antaranews.com/rss/teknologi" },
+  { name: "CNN Indonesia Teknologi", category: "technology", language: "id", priority: 86, tier: "B", url: "https://www.cnnindonesia.com/teknologi/rss" },
+  { name: "Sindonews Tekno", category: "technology", language: "id", priority: 84, tier: "B", url: "https://tekno.sindonews.com/rss" },
+  { name: "Okezone Techno", category: "technology", language: "id", priority: 76, tier: "C", url: "https://techno.okezone.com/feed/rss" },
+  { name: "TechCrunch", category: "technology", language: "en", priority: 92, tier: "A", url: "https://techcrunch.com/feed/" },
+  { name: "The Verge", category: "technology", language: "en", priority: 90, tier: "A", url: "https://www.theverge.com/rss/index.xml" },
+  { name: "Ars Technica", category: "technology", language: "en", priority: 88, tier: "A", url: "https://feeds.arstechnica.com/arstechnica/index" },
+  { name: "Wired", category: "technology", language: "en", priority: 82, tier: "B", url: "https://www.wired.com/feed/rss" },
+  { name: "Blockchain Media ID", category: "crypto", language: "id", priority: 100, tier: "A", url: "https://blockchainmedia.id/feed/" },
+  { name: "Pintu News", category: "crypto", language: "id", priority: 96, tier: "A", url: "https://pintu.co.id/news/rss" },
+  { name: "Cryptowave Indonesia", category: "crypto", language: "id", priority: 88, tier: "B", url: "https://cryptowave.co.id/feed/" },
+  { name: "Indodax Blog", category: "crypto", language: "id", priority: 84, tier: "B", url: "https://indodax.com/blog/feed/" },
+  { name: "CoinDesk", category: "crypto", language: "en", priority: 98, tier: "A", url: "https://www.coindesk.com/arc/outboundfeeds/rss/" },
+  { name: "CoinTelegraph", category: "crypto", language: "en", priority: 96, tier: "A", url: "https://cointelegraph.com/rss" },
+  { name: "Decrypt", category: "crypto", language: "en", priority: 88, tier: "B", url: "https://decrypt.co/feed" },
+  { name: "The Block", category: "crypto", language: "en", priority: 87, tier: "B", url: "https://www.theblock.co/rss.xml" },
+  { name: "Blockworks", category: "crypto", language: "en", priority: 85, tier: "B", url: "https://blockworks.co/feed" },
+  { name: "CryptoSlate", category: "crypto", language: "en", priority: 78, tier: "C", url: "https://cryptoslate.com/feed/" },
+  { name: "Bitcoin Magazine", category: "crypto", language: "en", priority: 76, tier: "C", url: "https://bitcoinmagazine.com/.rss/full/" },
+  { name: "CoinMarketCap Headlines", category: "crypto_market", language: "en", priority: 74, tier: "C", url: "https://coinmarketcap.com/headlines/feed/" }
+];
 const CONTEXT_TOKEN_RESERVE = Number(process.env.CONTEXT_TOKEN_RESERVE || 2048);
 const DATA_DIR = path.join(__dirname, "..", "data", "sessions");
 const INDEX_FILE = path.join(DATA_DIR, "index.json");
@@ -48,8 +89,15 @@ module.exports = {
   NVIDIA_MODEL,
   NVIDIA_CONTEXT_TOKENS,
   GOOGLE_NEWS_RSS_URL,
+  JINA_BASE_URL,
+  JINA_API_KEY,
   COINGECKO_SIMPLE_PRICE_URL,
   COINGECKO_API_KEY,
+  LOGAM_MULIA_PRICE_URL,
+  YAHOO_FINANCE_GOLD_URL,
+  PIHPS_PAGE_URL,
+  PIHPS_CHART_URL,
+  PANEL_HARGA_PANGAN_URL,
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_PROVIDER,
   TELEGRAM_MODEL,
@@ -57,6 +105,7 @@ module.exports = {
   TELEGRAM_SURFACE_MODE,
   TELEGRAM_INCLUDE_REASONING,
   CRYPTO_RSS_URLS,
+  LIVE_RSS_SOURCE_REGISTRY,
   CONTEXT_TOKEN_RESERVE,
   DATA_DIR,
   INDEX_FILE,
