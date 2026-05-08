@@ -1,4 +1,5 @@
 const { buildCurrentTimeSystemLine, needsCurrentTimeTool, runCurrentTimeTool } = require("../tools/time-tool");
+const { needsDexscreenerLookup, runDexscreenerLookup } = require("../tools/dexscreener-tool");
 const { classifyLiveIntent, needsWebLiveLookup, runWebLiveLookup } = require("../tools/web-live-tool");
 const {
   defaultModelFor,
@@ -166,6 +167,8 @@ function friendlyToolLabel(name) {
       return "waktu saat ini";
     case "web.live":
       return "data live dari web";
+    case "dexscreener.lookup":
+      return "data live Dexscreener";
     default:
       return "data live";
   }
@@ -177,25 +180,11 @@ function friendlyToolFailureReply(name) {
       return "Saya belum bisa mengambil hasil Google News search sekarang.";
     case "time.now":
       return "Saya belum bisa mengambil waktu saat ini sekarang.";
+    case "dexscreener.lookup":
+      return "Saya belum bisa mengambil data Dexscreener sekarang.";
     default:
       return `Saya belum bisa mengambil ${friendlyToolLabel(name)} sekarang.`;
   }
-}
-
-function isPlainTimeRequest(message = "") {
-  const text = String(message || "").toLowerCase();
-  if (!needsCurrentTimeTool(text)) return false;
-  return !/\b(harga|price|rate|kurs|siapa|who|jumlah|count|total|news|berita|status|saham|stock|cuaca|weather|score|skor|link|streaming|siaran langsung|nonton|jadwal|schedule|persib|persija|liga)\b/i.test(text);
-}
-
-function buildDirectToolReply(results) {
-  const directResults = results.filter((result) => result.directReply && !result.passToModel);
-  if (!directResults.length) return "";
-  const webLiveResult = directResults.find((result) => result.name === "web.live");
-  if (webLiveResult) return webLiveResult.directReply;
-  const timeResult = directResults.find((result) => result.name === "time.now");
-  if (timeResult) return timeResult.directReply;
-  return directResults[0].directReply;
 }
 
 function normalizeOrchestratorDecision(raw = {}) {
@@ -204,21 +193,16 @@ function normalizeOrchestratorDecision(raw = {}) {
   const categoryHint = String(raw?.categoryHint || "").trim().toLowerCase();
   const confidence = Math.max(0, Math.min(1, Number(raw?.confidence || 0)));
   const query = String(raw?.query || "").trim();
+  const validTools = ["web.live", "time.now", "dexscreener.lookup", "none"];
 
   return {
     mode: mode === "live" ? "live" : mode === "local" ? "local" : "",
-    tool: ["web.live", "time.now", "none"].includes(tool) ? tool : "",
+    tool: validTools.includes(tool) ? tool : "",
     categoryHint: ORCHESTRATOR_CATEGORY_HINTS.includes(categoryHint) ? categoryHint : "",
     query,
     confidence,
     reason: String(raw?.reason || "").trim()
   };
-}
-
-function shouldPromoteOrchestratorToLive(message, decision = null) {
-  if (!decision?.categoryHint || decision?.tool === "time.now") return false;
-  const text = String(message || "").toLowerCase();
-  return /\b(harga|price|berita|news|siapa|who|status|kurs|rate|berapa|terbaru|terkini|update|sekarang|hari ini)\b/.test(text);
 }
 
 async function runRoutingOrchestrator(message, options = {}) {
@@ -228,11 +212,14 @@ async function runRoutingOrchestrator(message, options = {}) {
 
   const currentYear = new Date().getFullYear();
   const system = [
-    "Route the user request for Worm. Return JSON only — no markdown, no explanation.",
-    `{"mode":"local|live","tool":"none|web.live|time.now","query":"optimized search query in user language (include year ${currentYear} for price/news queries)","categoryHint":"crypto_price|crypto_price_historical|gold_price|staple_price|forex_price|general_price|technology_news|sports_news|economy_news|general_news|office|person_relation|count","confidence":0.0,"reason":"short"}`,
+    "Route the user request for Worm. Return exactly this JSON structure with these keys: mode, tool, query, categoryHint, confidence, reason.",
+    `For 'mode', use: local or live.`,
+    `For 'tool', use: none, web.live, time.now, or dexscreener.lookup.`,
+    `For 'categoryHint', pick one from: crypto_price, crypto_price_historical, gold_price, staple_price, forex_price, general_price, technology_news, sports_news, economy_news, general_news, office, person_relation, count.`,
     "Current facts/prices/news/leaders/status => live + web.live.",
     "Historical crypto price questions (e.g. bitcoin 3 days ago) => live + web.live, never time.now.",
     "User includes a URL to read/check/summarize => live + web.live.",
+    "Dexscreener token lookups (e.g. specific Solana/ERC20 token, contract address, meme coin) => live + dexscreener.lookup.",
     "Time-only questions (jam, waktu, tanggal) => live + time.now.",
     "Stable knowledge/math/language/chat => local + none, query can be empty.",
     `For query field: write a clean, specific search query. Include '${currentYear}' for price/news. Use Indonesian if user speaks Indonesian.`,
@@ -325,26 +312,47 @@ async function resolveToolContext(message, options = {}) {
     ? getContextualOfficeFollowup(options.session, message)
     : null;
   const effectiveMessage = followup?.originalMessage || contextualOfficeFollowup?.originalMessage || message;
+  const heuristicNeedsLiveWeb = needsWebLiveLookup(effectiveMessage);
+  const heuristicNeedsTime = needsCurrentTimeTool(effectiveMessage);
+  const heuristicNeedsDexscreener = needsDexscreenerLookup(effectiveMessage);
+
+  if (surfaceMode === "deep_surf" && !followup && !contextualOfficeFollowup && !heuristicNeedsLiveWeb && !heuristicNeedsTime && !heuristicNeedsDexscreener) {
+    return {
+      toolResults: [],
+      toolContext: "",
+      directReply: ""
+    };
+  }
 
   // --- PASS 1: LLM routing orchestrator (authoritative) ---
   const orchestratorDecision = surfaceMode === "deep_surf"
     ? await runRoutingOrchestrator(effectiveMessage, options).catch(() => null)
     : null;
 
+  if (orchestratorDecision) {
+    console.log(`[orchestrator] tool=${orchestratorDecision.tool} mode=${orchestratorDecision.mode} cat=${orchestratorDecision.categoryHint} conf=${orchestratorDecision.confidence} q="${orchestratorDecision.query}"`);
+  } else if (surfaceMode === "deep_surf") {
+    console.log(`[orchestrator] LLM unavailable, falling back to regex heuristics`);
+  }
+
   // LLM is authoritative; regex heuristics only as fallback when LLM unavailable
   const orchestratorNeedsLiveWeb = orchestratorDecision
     ? (orchestratorDecision.mode === "live" && orchestratorDecision.tool === "web.live")
-    : needsWebLiveLookup(effectiveMessage);
+    : heuristicNeedsLiveWeb;
   const orchestratorNeedsTime = orchestratorDecision
     ? (orchestratorDecision.tool === "time.now")
-    : needsCurrentTimeTool(effectiveMessage);
+    : heuristicNeedsTime;
+  const orchestratorNeedsDexscreener = orchestratorDecision
+    ? (orchestratorDecision.mode === "live" && orchestratorDecision.tool === "dexscreener.lookup")
+    : heuristicNeedsDexscreener;
 
-  // Always include current time alongside web search
+  // Always include current time alongside external lookups
   const needsLiveWeb = orchestratorNeedsLiveWeb;
-  const shouldRunTimeTool = orchestratorNeedsTime || needsLiveWeb; // time always useful with web
+  const needsDexscreener = orchestratorNeedsDexscreener;
+  const shouldRunTimeTool = orchestratorNeedsTime || needsLiveWeb || needsDexscreener;
 
   // Block live web in local surface mode
-  if (surfaceMode === "local" && needsLiveWeb) {
+  if (surfaceMode === "local" && (needsLiveWeb || needsDexscreener)) {
     return {
       toolResults: [],
       toolContext: "",
@@ -359,6 +367,10 @@ async function resolveToolContext(message, options = {}) {
   if (shouldRunTimeTool) {
     directToolIntents.push("time.now");
     tasks.push(Promise.resolve(runCurrentTimeTool(effectiveMessage)));
+  }
+  if (surfaceMode === "deep_surf" && needsDexscreener) {
+    directToolIntents.push("dexscreener.lookup");
+    tasks.push(runDexscreenerLookup(effectiveMessage));
   }
   if (surfaceMode === "deep_surf" && needsLiveWeb) {
     directToolIntents.push("web.live");
@@ -381,6 +393,8 @@ async function resolveToolContext(message, options = {}) {
       directReply: ""   // errors become toolContext, not bypassing LLM
     };
   });
+
+  console.log(`[orchestrator] tools executed: [${directToolIntents.join(", ")}] results: ${toolResults.length}`);
 
   // All results go through LLM — no directReply bypass for tool results
   return {

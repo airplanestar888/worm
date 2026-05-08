@@ -5,7 +5,8 @@
   "description": "Minimal localhost chat UI inspired by modern AI chat surfaces",
   "main": "server/worm.js",
   "scripts": {
-    "start": "node server/worm.js"
+    "start": "node server/worm.js",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
     "axios": "^1.11.0",

@@ -40,11 +40,16 @@ function providerContextBudget(provider) {
   return Math.max(1024, base - CONTEXT_TOKEN_RESERVE);
 }
 
+function isOperationalErrorContent(text = "") {
+  return /^(?:LLM request failed|Something went wrong|Ada kendala|Stream model terputus|Provider belum siap)/i.test(String(text || "").trim());
+}
+
 function buildProviderMessages(session, systemText, provider) {
   const budget = providerContextBudget(provider);
   const history = (session.messages || [])
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({ role: m.role, content: String(m.content || "") }));
+    .map((m) => ({ role: m.role, content: String(m.content || "(No response)") }))
+    .filter((m) => m.role !== "assistant" || !isOperationalErrorContent(m.content));
 
   const selected = [];
   let used = estimateTokens(systemText);
@@ -55,7 +60,12 @@ function buildProviderMessages(session, systemText, provider) {
 
     if (selected.length > 0 && used + cost > budget) continue;
 
-    selected.unshift(message);
+    // Collapse consecutive messages of the same role
+    if (selected.length > 0 && selected[0].role === message.role) {
+      selected[0].content = `${message.content}\n\n${selected[0].content}`;
+    } else {
+      selected.unshift({ ...message });
+    }
     used += cost;
 
     if (used >= budget) break;
@@ -141,6 +151,7 @@ function stripAssistantArtifacts(text) {
 function looksLikeLeakedInternalOutput(text = "") {
   const value = String(text || "").trim();
   if (!value) return false;
+  if (/LLM request failed|provider rejected the request schema|tool payload/i.test(value)) return true;
   if (/^thinking\b/i.test(value)) return true;
   if (/^the user wants to\b/i.test(value)) return true;
   if (/\{\s*"id"\s*:\s*"?[\w-]+"?[\s\S]*"(?:url|query|source|cursor)"\s*:/i.test(value)) return true;
@@ -148,9 +159,21 @@ function looksLikeLeakedInternalOutput(text = "") {
   return false;
 }
 
-async function runProviderRound({ provider, model, messages, mode, attempts = 3 }) {
-  const streamResponse = await openProviderStreamWithRetry({ provider, model, messages, mode, attempts });
-  return collectProviderStream(streamResponse, provider, model);
+async function runProviderRound({ provider, model, messages, mode, attempts }) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const streamResponse = await openProviderStreamWithRetry({ provider, model, messages, mode, attempts: 1 });
+      return await collectProviderStream(streamResponse, provider, model);
+    } catch (err) {
+      lastError = err;
+      if (!isRetryableProviderError(err) && !String(err.message).includes("provider rejected")) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1500 * attempt));
+    }
+  }
+  throw lastError;
 }
 
 function normalizeProvider(provider) {
@@ -277,9 +300,17 @@ function collectProviderStream(streamResponse, provider, model) {
           if (parsedToken.reasoning) fullReasoning += parsedToken.reasoning;
           if (parsedToken.content) fullReply += parsedToken.content;
 
+          if (/LLM request failed|provider rejected the request schema|tool payload/i.test(fullReply.trim())) {
+            throw new Error(fullReply.trim());
+          }
+
           const finished = isSse ? parsed?.choices?.[0]?.finish_reason : parsed?.done;
           if (finished) finish(parsed.model || model);
-        } catch (_err) {}
+        } catch (err) {
+          if (err instanceof Error && /LLM request failed|provider rejected|tool payload/i.test(err.message)) {
+            return reject(err);
+          }
+        }
       }
     });
 

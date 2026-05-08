@@ -145,14 +145,31 @@ app.patch("/api/sessions/:id", (req, res) => {
   const token = String(req.body?.token || "").trim();
   const title = String(req.body?.title || "").trim();
   const surfaceMode = String(req.body?.surfaceMode || "").trim().toLowerCase();
+  const hasProvider = Object.prototype.hasOwnProperty.call(req.body || {}, "provider");
+  const hasModel = Object.prototype.hasOwnProperty.call(req.body || {}, "model");
+  const provider = String(req.body?.provider || "").trim().toLowerCase();
+  const model = String(req.body?.model || "").trim();
   const session = verifySession(sessionId, token);
   if (!session) return res.status(404).json({ ok: false, error: "Session not found." });
-  if (!title && !surfaceMode) return res.status(400).json({ ok: false, error: "No session changes provided." });
+  if (!title && !surfaceMode && !hasProvider && !hasModel) return res.status(400).json({ ok: false, error: "No session changes provided." });
+  if (hasProvider && !PROVIDER_DEFAULTS[provider]) return res.status(400).json({ ok: false, error: "Invalid provider." });
+
+  const beforeProvider = session.provider;
+  const beforeModel = session.model;
   if (title) session.title = title.slice(0, 80);
   if (surfaceMode) session.surfaceMode = surfaceMode === "deep_surf" ? "deep_surf" : "local";
+  if (hasProvider) session.provider = provider;
+  if (hasModel && model) {
+    session.model = model;
+  } else if (hasProvider && session.provider !== beforeProvider) {
+    session.model = defaultModelFor(session.provider);
+  }
   session.updatedAt = new Date().toISOString();
   writeSession(session);
   updateSessionIndex(session);
+  if (beforeProvider !== session.provider || beforeModel !== session.model) {
+    closeSessionStream(session.id);
+  }
   res.json({ ok: true, session });
 });
 
@@ -194,4 +211,12 @@ server.on("error", (err) => {
   }
   console.error(describeError(err, "Worm server failed to start"));
   process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[worm] unhandled promise rejection:", reason?.message || reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[worm] uncaught exception:", err?.message || err);
 });

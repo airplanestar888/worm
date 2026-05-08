@@ -37,6 +37,17 @@ for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr /R /C:":%PORT% .*LISTE
 )
 timeout /t 1 /nobreak >nul
 
+:: Forced shutdown can leave the Telegram polling lock behind.
+:: Remove it only when the recorded PID is no longer alive.
+if exist "data\telegram-bot.lock" (
+  set /p WORM_TELEGRAM_LOCK_PID=<"data\telegram-bot.lock"
+  tasklist /FI "PID eq %WORM_TELEGRAM_LOCK_PID%" 2>nul | findstr /R /C:"node.exe" >nul
+  if errorlevel 1 (
+    echo [info] Removing stale Telegram polling lock ^(PID %WORM_TELEGRAM_LOCK_PID%^).
+    del /f /q "data\telegram-bot.lock" >nul 2>&1
+  )
+)
+
 echo [start] Running: node server/worm.js
 echo.
 

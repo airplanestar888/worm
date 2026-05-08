@@ -67,21 +67,66 @@ function mergeOrderedListDescriptions(text = '') {
   const merged = [];
 
   for (let index = 0; index < lines.length; index += 1) {
-    const current = lines[index];
-    const next = lines[index + 1] || '';
+    let current = lines[index];
     const currentIsOrdered = /^\s*\d+\.\s+\S/.test(current);
-    const nextIsBullet = /^\s*[-*]\s+\S/.test(next);
+    const currentIsBullet = /^\s*[-*]\s+\S/.test(current);
 
-    if (currentIsOrdered && nextIsBullet) {
-      merged.push(`${current} — ${next.replace(/^\s*[-*]\s+/, '')}`);
-      index += 1;
-      continue;
+    if (currentIsOrdered || currentIsBullet) {
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1] || '';
+        const trimmedNext = next.trim();
+        if (!trimmedNext) break;
+        if (/^\s*\d+\.\s+\S/.test(next)) break;
+        if (/^(#{1,3})\s+/.test(trimmedNext)) break;
+        if (/^(Sumber:|Source:)/i.test(trimmedNext)) break;
+
+        if (/^\s*[-*]\s+\S/.test(next)) {
+          if (!currentIsOrdered) break;
+          current = `${current} — ${trimmedNext.replace(/^[-*]\s+/, '')}`;
+          index += 1;
+          continue;
+        }
+
+        current = `${current} ${trimmedNext}`;
+        index += 1;
+      }
     }
 
     merged.push(current);
   }
 
   return merged.join('\n');
+}
+
+function fallbackBrokenOrderedListsToBullets(text = '') {
+  const lines = String(text || '').split('\n');
+  const numberedIndexes = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^\s*\d+\.\s+\S/.test(lines[index])) numberedIndexes.push(index);
+  }
+
+  if (numberedIndexes.length < 2) return String(text || '');
+
+  let hasBrokenOrderedBlock = false;
+  for (let i = 1; i < numberedIndexes.length; i += 1) {
+    if (numberedIndexes[i] - numberedIndexes[i - 1] <= 1) continue;
+    const between = lines.slice(numberedIndexes[i - 1] + 1, numberedIndexes[i]);
+    if (between.some((line) => {
+      const trimmed = line.trim();
+      return trimmed
+        && !/^[-*]\s+\S/.test(trimmed)
+        && !/^(#{1,3})\s+/.test(trimmed)
+        && !/^(Sumber:|Source:)/i.test(trimmed);
+    })) {
+      hasBrokenOrderedBlock = true;
+      break;
+    }
+  }
+
+  if (!hasBrokenOrderedBlock) return String(text || '');
+
+  return lines.map((line) => line.replace(/^\s*\d+\.\s+(\S.*)$/, '- $1')).join('\n');
 }
 
 function renderMarkdown(raw) {
@@ -93,7 +138,7 @@ function renderMarkdown(raw) {
     cb.push(`<div class="code-block"><div class="code-lang">${label}</div><code>${escapeHtml(code.replace(/\n$/, ''))}</code></div>`);
     return `\x00CB${i}\x00`;
   });
-  text = mergeOrderedListDescriptions(renumberRepeatedOrderedItems(text));
+  text = mergeOrderedListDescriptions(fallbackBrokenOrderedListsToBullets(renumberRepeatedOrderedItems(text)));
   const lines = text.split('\n');
   const out = [];
   let inUl = false;
@@ -108,7 +153,7 @@ function renderMarkdown(raw) {
   for (const line of lines) {
     const headingMatch = line.match(/^(#{1,3}) (.+)/);
     const ulMatch = line.match(/^[-*] (.+)/);
-    const olMatch = line.match(/^\d+\. (.+)/);
+    const olMatch = line.match(/^(\d+)\. (.+)/);
     const isCodeBlock = line.includes('\x00CB');
 
     if (headingMatch) {
@@ -131,7 +176,7 @@ function renderMarkdown(raw) {
       flushParagraph();
       if (inUl) { out.push('</ul>'); inUl = false; }
       if (!inOl) { out.push('<ol>'); inOl = true; }
-      out.push(`<li>${inlineFormat(olMatch[1])}</li>`);
+      out.push(`<li value="${Number(olMatch[1])}">${inlineFormat(olMatch[2])}</li>`);
       continue;
     }
 
@@ -278,6 +323,10 @@ function formatResponseTime(ms) {
   return `${(value / 1000).toFixed(0)} s`;
 }
 
+function encodeCopyPayload(text = '') {
+  return encodeURIComponent(String(text || ''));
+}
+
 function extractEvidenceLine(content = "") {
   const match = String(content || "").match(/(?:^|\n)Evidence:\s*(.+?)(?:\n|$)/i);
   return match ? match[1].trim() : "";
@@ -296,20 +345,31 @@ function stripEvidenceAndScore(content = "") {
     .trim();
 }
 
-function buildAnswerMeta(source = '', responseMs = null, score = null) {
+function buildAnswerMeta(source = '', score = null) {
   const items = [];
   if (source) {
     items.push(`<span class="answer-source">Sumber: ${escapeHtml(source)}</span>`);
-  }
-  const timing = formatResponseTime(responseMs);
-  if (timing) {
-    items.push(`<span class="answer-time">${escapeHtml(timing)}</span>`);
   }
   if (Number.isFinite(score)) {
     items.push(`<span class="answer-score">score ${escapeHtml(String(score))}</span>`);
   }
   if (!items.length) return '';
   return `<div class="answer-meta">${items.join('<span class="answer-meta-sep">·</span>')}</div>`;
+}
+
+function buildAssistantActions(copyText = '', responseMs = null) {
+  const timing = formatResponseTime(responseMs);
+  const copyAttr = encodeCopyPayload(copyText);
+  return `
+    <div class="assistant-actions">
+      <button class="assistant-action-btn msg-copy-btn" type="button" title="Copy answer" aria-label="Copy answer" data-copy-content="${copyAttr}">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="5" y="5" width="8" height="9" rx="1.8"></rect>
+          <path d="M3.5 11V3.8C3.5 2.81 4.31 2 5.3 2h5.2"></path>
+        </svg>
+      </button>
+      ${timing ? `<span class="assistant-action-time">${escapeHtml(timing)}</span>` : ''}
+    </div>`;
 }
 
 function renderAnswerWithSource(raw = '', options = {}) {
@@ -322,13 +382,14 @@ function renderAnswerWithSource(raw = '', options = {}) {
     ? renderMarkdown(cleanContent)
     : '';
   const evidenceHtml = evidence ? `<div class="answer-evidence">Evidence: ${escapeHtml(evidence)}</div>` : '';
-  const metaHtml = buildAnswerMeta(parsed.source, responseMs, score);
+  const metaHtml = buildAnswerMeta(parsed.source, score);
+  const actionsHtml = buildAssistantActions(cleanContent, responseMs);
 
   if (!answerHtml && !evidenceHtml && !metaHtml) {
     return '<div class="answer-block empty">No reply.</div>';
   }
 
-  return `<div class="answer-block${!answerHtml ? ' empty' : ''}">${answerHtml || ''}${evidenceHtml}${metaHtml}</div>`;
+  return `<div class="answer-block${!answerHtml ? ' empty' : ''}">${answerHtml || ''}${evidenceHtml}${metaHtml}</div>${actionsHtml}`;
 }
 
 function renderFriendlyError(target, message, responseMs = null) {
@@ -613,6 +674,25 @@ async function persistSurfaceMode(mode) {
   }
 }
 
+async function persistSessionRuntimeSettings(settings = {}) {
+  if (!activeSession?.id || !activeSession?.token) return;
+  const payload = { token: activeSession.token };
+  if (settings.provider) payload.provider = settings.provider;
+  if (settings.model) payload.model = settings.model;
+  if (!payload.provider && !payload.model) return;
+
+  const res = await fetch(`/api/sessions/${encodeURIComponent(activeSession.id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || 'Failed to update session settings.');
+  activeSession = data.session;
+  saveActiveSession();
+  await refreshSessionList();
+}
+
 function applySurfaceMode(mode = 'local', options = {}) {
   currentSurfaceMode = mode === 'deep_surf' ? 'deep_surf' : 'local';
   if (surfaceModeSelect) surfaceModeSelect.value = currentSurfaceMode;
@@ -684,12 +764,22 @@ function syncCollapsedNewBtn() {
   document.getElementById('newChatBtnCollapsed').style.display = collapsed ? '' : 'none';
 }
 
+function renderReasoningAccordion(reasoning = '') {
+  if (!reasoning) return '';
+  return `
+    <details class="reasoning-block">
+      <summary class="reasoning-summary">
+        <span class="reasoning-label">Thinking</span>
+        <span class="reasoning-chevron" aria-hidden="true">▾</span>
+      </summary>
+      <div class="reasoning-text">${escapeHtml(reasoning)}</div>
+    </details>`;
+}
+
 function renderAssistantMessage(content = '', reasoning = '', responseMs = null) {
   const parsed = extractThinkBlocks(content);
   const mergedReasoning = [reasoning, parsed.reasoning].filter(Boolean).join('\n\n').trim();
-  const safeReasoning = mergedReasoning
-    ? `<div class="reasoning-block"><div class="reasoning-label">Thinking</div><div class="reasoning-text">${escapeHtml(mergedReasoning)}</div></div>`
-    : '';
+  const safeReasoning = renderReasoningAccordion(mergedReasoning);
   const safeAnswer = parsed.content
     ? renderAnswerWithSource(parsed.content, { responseMs })
     : (mergedReasoning ? '' : '<div class="answer-block empty">No reply.</div>');
@@ -727,6 +817,20 @@ function closeDropdown() {
 
 document.addEventListener('click', (e) => {
   if (!e.target.closest('.chat-dropdown') && !e.target.closest('.chat-menu-btn')) closeDropdown();
+});
+
+messagesEl.addEventListener('click', async (event) => {
+  const copyBtn = event.target.closest('.msg-copy-btn');
+  if (!copyBtn) return;
+  const raw = copyBtn.getAttribute('data-copy-content') || '';
+  const text = decodeURIComponent(raw);
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    showSelectionToast('Jawaban dicopy');
+  } catch {
+    showSelectionToast('Copy gagal');
+  }
 });
 
 function showChatDropdown(btn, item, session) {
@@ -1069,7 +1173,7 @@ async function sendMessage() {
 
   const pending = document.createElement('div');
   pending.className = 'msg assistant';
-  pending.innerHTML = `<div class="msg-who">Worm</div><div class="msg-body"><div class="msg-meta">Using ${escapeHtml(buildRunLabel(providerSelect.value, model, mode))}</div><div class="reasoning-block" style="display:none"><div class="reasoning-label">Thinking</div><div class="reasoning-text"></div></div><div class="answer-block"><span class="thinking"><span class="td"></span><span class="td"></span><span class="td"></span></span></div></div>`;
+  pending.innerHTML = `<div class="msg-who">Worm</div><div class="msg-body"><div class="msg-meta">Using ${escapeHtml(buildRunLabel(providerSelect.value, model, mode))}</div><details class="reasoning-block" style="display:none"><summary class="reasoning-summary"><span class="reasoning-label">Thinking</span><span class="reasoning-chevron" aria-hidden="true">▾</span></summary><div class="reasoning-text"></div></details><div class="assistant-answer-slot"><div class="answer-block"><span class="thinking"><span class="td"></span><span class="td"></span><span class="td"></span></span></div></div></div>`;
   messagesEl.appendChild(pending);
   scrollToBottom();
   const pendingBody = pending.querySelector('.msg-body');
@@ -1109,7 +1213,7 @@ async function sendMessage() {
     let rawText = '';
     const reasoningBox = pendingBody.querySelector('.reasoning-block');
     const reasoningText = pendingBody.querySelector('.reasoning-text');
-    const answerBox = pendingBody.querySelector('.answer-block');
+    const answerBox = pendingBody.querySelector('.assistant-answer-slot');
 
     while (true) {
       const { value, done } = await reader.read();
@@ -1168,7 +1272,7 @@ async function sendMessage() {
           const mergedReasoning = [fullReasoning, parsed.reasoning].filter(Boolean).join('\n\n').trim();
           if (reasoningBox) reasoningBox.style.display = mergedReasoning ? 'block' : 'none';
           if (reasoningText) reasoningText.textContent = mergedReasoning;
-          if (answerBox) answerBox.innerHTML = renderAnswerWithSource(fullText).replace(/^<div class="answer-block(?: empty)?">|<\/div>$/g, '');
+          if (answerBox) answerBox.innerHTML = renderAnswerWithSource(fullText);
           else pendingBody.textContent = fullText;
           scrollToBottom();
         }
@@ -1182,7 +1286,7 @@ async function sendMessage() {
             const mergedReasoning = [doneReasoning, parsed.reasoning].filter(Boolean).join('\n\n').trim();
             if (reasoningBox) reasoningBox.style.display = mergedReasoning ? 'block' : 'none';
             if (reasoningText) reasoningText.textContent = mergedReasoning;
-            if (answerBox) answerBox.innerHTML = renderAnswerWithSource(fullText).replace(/^<div class="answer-block(?: empty)?">|<\/div>$/g, '');
+            if (answerBox) answerBox.innerHTML = renderAnswerWithSource(fullText, { responseMs: payload.responseMs ?? (performance.now() - requestStartedAt) });
             else pendingBody.textContent = fullText;
           }
           if (pendingMeta) {
@@ -1247,15 +1351,27 @@ providerSelect.addEventListener('change', async () => {
   updateComposerSettingsSummary();
   await activateStartupGateway();
   await loadModels();
+  try {
+    await persistSessionRuntimeSettings({ provider: providerSelect.value, model: modelSelect.value });
+  } catch {
+    showSelectionToast('Provider berubah di UI, tapi belum tersimpan ke session.');
+    return;
+  }
   setStatusUi('status-dot idle', `Checking ${formatProviderLabel(providerSelect.value)}...`);
   showSelectionToast(`Provider set to ${formatProviderLabel(providerSelect.value)}.`);
   setTimeout(() => loadHealth(), 300);
 });
 
-modelSelect.addEventListener('change', () => {
+modelSelect.addEventListener('change', async () => {
   if (!modelSelect.value) return;
   updateComposerSettingsSummary();
   stopActiveStreamForControlChange('Stream dihentikan karena model diganti.');
+  try {
+    await persistSessionRuntimeSettings({ provider: providerSelect.value, model: modelSelect.value });
+  } catch {
+    showSelectionToast('Model berubah di UI, tapi belum tersimpan ke session.');
+    return;
+  }
   showSelectionToast(`Model set to ${formatModelLabel(modelSelect.value)}.`);
 });
 

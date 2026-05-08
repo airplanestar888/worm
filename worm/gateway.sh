@@ -25,6 +25,16 @@ if [ -n "$OLD_PID" ]; then
   sleep 1
 fi
 
+# Forced shutdown can leave the Telegram polling lock behind.
+# Remove it only when the recorded PID is no longer alive.
+if [ -f data/telegram-bot.lock ]; then
+  LOCK_PID="$(cat data/telegram-bot.lock 2>/dev/null || true)"
+  if [ -z "$LOCK_PID" ] || ! kill -0 "$LOCK_PID" 2>/dev/null; then
+    echo "[info] Removing stale Telegram polling lock (PID ${LOCK_PID:-unknown})."
+    rm -f data/telegram-bot.lock
+  fi
+fi
+
 echo "[start] Running: node server/worm.js"
 echo
 

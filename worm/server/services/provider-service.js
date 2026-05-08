@@ -45,9 +45,7 @@ async function streamNvidiaChat({ model, messages, mode }) {
       model,
       stream: true,
       messages,
-      temperature: mode === "high" ? 0.7 : mode === "medium" ? 0.5 : 0.3,
-      top_p: 0.9,
-      max_tokens: 2048
+      temperature: mode === "high" ? 0.7 : mode === "medium" ? 0.5 : 0.3
     },
     responseType: "stream",
     timeout: 180000,

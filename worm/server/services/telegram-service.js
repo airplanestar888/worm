@@ -16,13 +16,15 @@ const { describeError } = require("../utils/errors");
 const { defaultModelFor, getProviderModels, isProviderConfigured } = require("./provider-service");
 const { generateAssistantReply } = require("./chat-service");
 const {
-  createSession,
-  updateSessionIndex,
   verifySession,
-  writeSession
+  createSession,
+  writeSession,
+  updateSessionIndex
 } = require("../store/session-store");
 
 const TELEGRAM_INDEX_FILE = path.join(DATA_DIR, "..", "telegram-sessions.json");
+const TELEGRAM_LOCK_FILE = path.join(DATA_DIR, "..", "telegram-bot.lock");
+const TELEGRAM_STATUS_FILE = path.join(DATA_DIR, "..", "telegram-polling-status.json");
 const telegramHttpsAgent = new https.Agent({ keepAlive: false });
 
 function telegramApiUrl(method) {
@@ -44,6 +46,57 @@ function readTelegramIndex() {
 function writeTelegramIndex(index) {
   ensureTelegramIndex();
   fs.writeFileSync(TELEGRAM_INDEX_FILE, JSON.stringify(index, null, 2));
+}
+
+function writeTelegramPollingStatus(status = {}) {
+  try {
+    fs.mkdirSync(path.dirname(TELEGRAM_STATUS_FILE), { recursive: true });
+    const previous = fs.existsSync(TELEGRAM_STATUS_FILE)
+      ? JSON.parse(fs.readFileSync(TELEGRAM_STATUS_FILE, "utf8"))
+      : {};
+    fs.writeFileSync(TELEGRAM_STATUS_FILE, JSON.stringify({
+      ...previous,
+      pid: process.pid,
+      updatedAt: new Date().toISOString(),
+      ...status
+    }, null, 2));
+  } catch (_err) {}
+}
+
+function isProcessAlive(pid) {
+  const value = Number(pid);
+  if (!Number.isFinite(value) || value <= 0) return false;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireTelegramPollingLock() {
+  fs.mkdirSync(path.dirname(TELEGRAM_LOCK_FILE), { recursive: true });
+
+  if (fs.existsSync(TELEGRAM_LOCK_FILE)) {
+    const existingPid = Number(fs.readFileSync(TELEGRAM_LOCK_FILE, "utf8").trim());
+    if (existingPid && existingPid !== process.pid && isProcessAlive(existingPid)) {
+      console.warn(`telegram bot polling skipped; another Worm process is active (pid ${existingPid})`);
+      return null;
+    }
+  }
+
+  fs.writeFileSync(TELEGRAM_LOCK_FILE, String(process.pid));
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    try {
+      const currentPid = fs.existsSync(TELEGRAM_LOCK_FILE)
+        ? Number(fs.readFileSync(TELEGRAM_LOCK_FILE, "utf8").trim())
+        : 0;
+      if (currentPid === process.pid) fs.unlinkSync(TELEGRAM_LOCK_FILE);
+    } catch (_err) {}
+  };
 }
 
 function resolveTelegramProvider() {
@@ -82,25 +135,8 @@ function updateTelegramChatRecord(chatId, updater) {
   return index.chats[key];
 }
 
-function getTelegramPreferences(chatId) {
-  const { record } = getTelegramChatRecord(chatId);
-  const provider = record.provider || resolveTelegramProvider();
-  const model = record.model || resolveTelegramModel(provider);
-  return { provider, model };
-}
-
-function setTelegramPreferences(chatId, preferences = {}) {
-  return updateTelegramChatRecord(chatId, (record) => ({
-    ...record,
-    ...(preferences.provider ? { provider: preferences.provider } : {}),
-    ...(preferences.model ? { model: preferences.model } : {}),
-    updatedAt: new Date().toISOString()
-  }));
-}
-
 function setTelegramSession(chatId, session) {
-  updateTelegramChatRecord(chatId, (record) => ({
-    ...record,
+  updateTelegramChatRecord(chatId, () => ({
     sessionId: session.id,
     token: session.token,
     updatedAt: new Date().toISOString()
@@ -111,6 +147,8 @@ function clearTelegramSession(chatId) {
   updateTelegramChatRecord(chatId, (record) => {
     delete record.sessionId;
     delete record.token;
+    delete record.provider;
+    delete record.model;
     record.updatedAt = new Date().toISOString();
     return record;
   });
@@ -118,18 +156,14 @@ function clearTelegramSession(chatId) {
 
 function getTelegramSession(chatId) {
   const { key, record: saved } = getTelegramChatRecord(chatId);
-  const preferences = getTelegramPreferences(chatId);
   let session = saved ? verifySession(saved.sessionId, saved.token) : null;
 
-  if (session && (session.provider !== preferences.provider || session.model !== preferences.model)) {
-    session = null;
-  }
-
   if (!session) {
+    const provider = resolveTelegramProvider();
     session = createSession({
       workspace: "Telegram",
-      provider: preferences.provider,
-      model: preferences.model,
+      provider,
+      model: resolveTelegramModel(provider),
       surfaceMode: TELEGRAM_SURFACE_MODE
     });
     session.title = `Telegram ${key}`;
@@ -137,6 +171,19 @@ function getTelegramSession(chatId) {
     updateSessionIndex(session);
   }
 
+  setTelegramSession(chatId, session);
+  return session;
+}
+
+function updateTelegramSessionRuntime(chatId, changes = {}) {
+  const session = getTelegramSession(chatId);
+  const provider = changes.provider || session.provider;
+  const model = changes.model || (changes.provider ? defaultModelFor(provider) : session.model);
+  session.provider = provider;
+  session.model = model;
+  session.updatedAt = new Date().toISOString();
+  writeSession(session);
+  updateSessionIndex(session);
   setTelegramSession(chatId, session);
   return session;
 }
@@ -150,14 +197,19 @@ async function telegramPost(method, data) {
   return res.data;
 }
 
-async function sendTelegramMessage(chatId, text) {
-  const chunks = splitTelegramText(text || "No reply.");
-  for (const chunk of chunks) {
-    await telegramPost("sendMessage", {
+async function sendTelegramMessage(chatId, text, options = {}) {
+  const chunks = splitTelegramText(sanitizeTelegramOutgoingText(text || "No reply."));
+  for (let i = 0; i < chunks.length; i += 1) {
+    const isLast = i === chunks.length - 1;
+    const payload = {
       chat_id: chatId,
-      text: chunk,
+      text: chunks[i],
       disable_web_page_preview: true
-    });
+    };
+    if (isLast && options.removeKeyboard) {
+      payload.reply_markup = { remove_keyboard: true };
+    }
+    await telegramPost("sendMessage", payload);
   }
 }
 
@@ -221,12 +273,28 @@ function splitTelegramText(text) {
 function buildTelegramReply(reply) {
   const content = String(reply?.content || "").trim() || "No reply.";
   const reasoning = String(reply?.reasoning || "").trim();
-  if (!TELEGRAM_INCLUDE_REASONING || !reasoning) return content;
-  return [`Thinking:\n${reasoning}`, content].join("\n\n---\n\n");
+  if (isInternalProviderErrorText(content)) {
+    return "Ada kendala saat memproses pesan. Bisa coba kirim ulang?";
+  }
+  const safeReasoning = isInternalProviderErrorText(reasoning) ? "" : reasoning;
+  if (!TELEGRAM_INCLUDE_REASONING || !safeReasoning) return content;
+  return [`Thinking:\n${safeReasoning}`, content].join("\n\n---\n\n");
+}
+
+function isInternalProviderErrorText(text = "") {
+  return /LLM request failed|provider rejected the request schema|tool payload|status code 400|status code 422/i.test(String(text || ""));
+}
+
+function sanitizeTelegramOutgoingText(text = "") {
+  const value = String(text || "").trim();
+  if (isInternalProviderErrorText(value)) {
+    return "Ada kendala saat memproses pesan. Bisa coba kirim ulang?";
+  }
+  return value || "No reply.";
 }
 
 async function sendProviderMenu(chatId) {
-  const { provider, model } = getTelegramPreferences(chatId);
+  const { provider, model } = getTelegramSession(chatId);
   await sendTelegramMenu(
     chatId,
     `Provider aktif: ${providerKeyToLabel(provider)}\nModel aktif: ${model}\n\nPilih provider:`,
@@ -235,7 +303,7 @@ async function sendProviderMenu(chatId) {
 }
 
 async function sendModelMenu(chatId) {
-  const { provider, model } = getTelegramPreferences(chatId);
+  const { provider, model } = getTelegramSession(chatId);
   if (!isProviderConfigured(provider)) {
     await sendTelegramMessage(chatId, `Provider ${providerKeyToLabel(provider)} belum siap.`);
     return;
@@ -258,9 +326,8 @@ async function tryHandleTelegramProviderSelection(chatId, text) {
   const provider = providerLabelToKey(text);
   if (!provider) return false;
   const model = defaultModelFor(provider);
-  setTelegramPreferences(chatId, { provider, model });
-  clearTelegramSession(chatId);
-  await sendTelegramMessage(chatId, `Sip, provider Telegram sekarang ${providerKeyToLabel(provider)}. Model default: ${model}.`);
+  updateTelegramSessionRuntime(chatId, { provider, model });
+  await sendTelegramMessage(chatId, `Sip, provider Telegram sekarang ${providerKeyToLabel(provider)}. Model default: ${model}.`, { removeKeyboard: true });
   await sendModelMenu(chatId);
   return true;
 }
@@ -268,13 +335,12 @@ async function tryHandleTelegramProviderSelection(chatId, text) {
 async function tryHandleTelegramModelSelection(chatId, text) {
   const value = String(text || "").trim();
   if (!value || value.startsWith("/")) return false;
-  const { provider } = getTelegramPreferences(chatId);
+  const { provider } = getTelegramSession(chatId);
   const models = await getProviderModels(provider).catch(() => []);
   const available = new Set((models.length ? models : [defaultModelFor(provider)]).map((item) => String(item).trim()));
   if (!available.has(value)) return false;
-  setTelegramPreferences(chatId, { model: value });
-  clearTelegramSession(chatId);
-  await sendTelegramMessage(chatId, `Oke, model Telegram sekarang ${value} (${providerKeyToLabel(provider)}).`);
+  updateTelegramSessionRuntime(chatId, { model: value });
+  await sendTelegramMessage(chatId, `Oke, model Telegram sekarang ${value} (${providerKeyToLabel(provider)}).`, { removeKeyboard: true });
   return true;
 }
 
@@ -284,13 +350,13 @@ async function handleTelegramMessage(message) {
   if (!chatId || !text) return;
 
   if (text === "/start") {
-    await sendTelegramMessage(chatId, "Halo, saya Worm. Kirim pesan apa saja, nanti saya jawab lewat mode Telegram.");
+    await sendTelegramMessage(chatId, "Halo, saya Worm. Kirim pesan apa saja, nanti saya jawab lewat mode Telegram.", { removeKeyboard: true });
     return;
   }
 
   if (text === "/reset") {
     clearTelegramSession(chatId);
-    await sendTelegramMessage(chatId, "Session Telegram Worm sudah direset.");
+    await sendTelegramMessage(chatId, "Session Telegram Worm sudah direset.", { removeKeyboard: true });
     return;
   }
 
@@ -305,7 +371,7 @@ async function handleTelegramMessage(message) {
   }
 
   if (text === "/status") {
-    const { provider, model } = getTelegramPreferences(chatId);
+    const { provider, model } = getTelegramSession(chatId);
     await sendTelegramMessage(chatId, `Telegram sekarang pakai ${providerKeyToLabel(provider)} · ${model}`);
     return;
   }
@@ -313,8 +379,8 @@ async function handleTelegramMessage(message) {
   if (await tryHandleTelegramProviderSelection(chatId, text)) return;
   if (await tryHandleTelegramModelSelection(chatId, text)) return;
 
-  const { provider, model } = getTelegramPreferences(chatId);
   const session = getTelegramSession(chatId);
+  const { provider, model } = session;
   const isReasoningFlow = String(TELEGRAM_SURFACE_MODE || "").trim().toLowerCase() === "deep_surf";
   const stopTyping = isReasoningFlow
     ? startTypingKeepalive(chatId)
@@ -329,7 +395,7 @@ async function handleTelegramMessage(message) {
       provider,
       model,
       mode: TELEGRAM_MODE,
-      surfaceMode: TELEGRAM_SURFACE_MODE,
+      surfaceMode: session.surfaceMode || TELEGRAM_SURFACE_MODE,
       workspace: "Telegram",
       sessionId: session.id,
       token: session.token
@@ -347,15 +413,24 @@ async function handleTelegramMessage(message) {
 }
 
 async function pollTelegramUpdates(state) {
+  writeTelegramPollingStatus({ state: "polling", lastPollAt: new Date().toISOString() });
   const res = await telegramPost("getUpdates", {
     offset: state.offset,
-    timeout: 25,
+    timeout: 0,
     allowed_updates: ["message"]
   });
 
   const updates = Array.isArray(res.result) ? res.result : [];
+  writeTelegramPollingStatus({
+    state: "ok",
+    lastSuccessAt: new Date().toISOString(),
+    lastUpdateCount: updates.length,
+    conflictCount: 0,
+    lastError: ""
+  });
   for (const update of updates) {
     state.offset = Math.max(state.offset, Number(update.update_id || 0) + 1);
+    writeTelegramPollingStatus({ lastHandledUpdateId: update.update_id, lastUpdateAt: new Date().toISOString() });
     await handleTelegramMessage(update.message);
   }
 }
@@ -366,14 +441,55 @@ function startTelegramBot() {
     return null;
   }
 
+  const releaseLock = acquireTelegramPollingLock();
+  if (!releaseLock) return null;
+
   const state = { offset: 0, stopped: false };
+  writeTelegramPollingStatus({ state: "starting", startedAt: new Date().toISOString(), conflictCount: 0 });
+  process.once("exit", releaseLock);
+  process.once("SIGINT", () => {
+    releaseLock();
+    process.exit(0);
+  });
+  process.once("SIGTERM", () => {
+    releaseLock();
+    process.exit(0);
+  });
+
   const loop = async () => {
+    // Clear any stale webhook before starting long-poll
+    try {
+      await telegramPost("deleteWebhook", { drop_pending_updates: false });
+    } catch (_) {}
+
+    let consecutive409 = 0;
     while (!state.stopped) {
       try {
         await pollTelegramUpdates(state);
+        consecutive409 = 0; // reset on success
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       } catch (err) {
-        console.error("[telegram] polling:", describeError(err, "Telegram polling failed"));
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+        const status = err?.response?.status;
+        if (status === 409) {
+          consecutive409 += 1;
+          writeTelegramPollingStatus({
+            state: "conflict",
+            conflictCount: consecutive409,
+            lastError: describeError(err, "Telegram polling conflict")
+          });
+          console.warn(`[telegram] polling: 409 conflict (${consecutive409}/10) — waiting 12s for old session to expire`);
+          if (consecutive409 >= 10) {
+            console.warn("[telegram] polling: conflict persists; keeping retry loop alive.");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 12000));
+        } else {
+          writeTelegramPollingStatus({
+            state: "error",
+            lastError: describeError(err, "Telegram polling failed")
+          });
+          console.error("[telegram] polling:", describeError(err, "Telegram polling failed"));
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        }
       }
     }
   };
@@ -383,6 +499,7 @@ function startTelegramBot() {
   return {
     stop() {
       state.stopped = true;
+      releaseLock();
     }
   };
 }

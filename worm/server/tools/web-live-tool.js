@@ -16,7 +16,19 @@ const {
   PIHPS_PAGE_URL,
   YAHOO_FINANCE_GOLD_URL
 } = require("../config");
+const { runCryptoNewsLookup } = require("./crypto-news-tool");
 const { parseRelativeDateRequest } = require("./time-tool");
+const {
+  createSearchProvider,
+  createDefaultSearchProviders,
+  createDefaultXSearchProviders,
+  createDefaultFetchProviders,
+  searchWeb,
+  xSearch,
+  mergePayloads,
+  fetchPage,
+  extractFirstUrl: extractFirstUrlFromRouter
+} = require("../services/web");
 
 const execFileAsync = promisify(execFile);
 
@@ -200,6 +212,22 @@ const LIVE_SPORTS_KEYWORDS = [
   "sepak bola",
   "football",
   "soccer"
+];
+
+const LIVE_SPORTS_SIGNAL_KEYWORDS = [
+  "hasil pertandingan",
+  "hasil laga",
+  "jadwal",
+  "schedule",
+  "fixture",
+  "kickoff",
+  "kick-off",
+  "score",
+  "skor",
+  "klasemen",
+  "standings",
+  "standing",
+  "match"
 ];
 
 const LIVE_PRODUCT_KEYWORDS = [
@@ -428,8 +456,7 @@ function normalizeSearchText(message) {
 }
 
 function extractFirstUrl(message = "") {
-  const match = String(message || "").match(/https?:\/\/[^\s)]+/i);
-  return String(match?.[0] || "").trim();
+  return extractFirstUrlFromRouter(message);
 }
 
 function shouldFetchDirectUrl(message = "") {
@@ -465,6 +492,8 @@ function detectLiveIntent(message) {
   const hasSportsEntity = hasAnyPhrase(text, LIVE_SPORTS_KEYWORDS);
   const hasCommodity = hasAnyPhrase(text, LIVE_COMMODITY_KEYWORDS);
   const hasVehicle = hasAnyPhrase(text, LIVE_VEHICLE_KEYWORDS);
+  const hasSportsSignal = hasAnyPhrase(text, LIVE_SPORTS_SIGNAL_KEYWORDS)
+    || /\b(hasil|laga|pertandingan|klasemen)\b/.test(text);
   const hasOfficeIntent = hasAnyPhrase(text, LIVE_OFFICE_KEYWORDS);
   const hasPersonRelationIntent = hasAnyPhrase(text, LIVE_PERSON_RELATION_KEYWORDS);
   const hasCountIntent = hasAnyPhrase(text, LIVE_COUNT_KEYWORDS);
@@ -472,6 +501,8 @@ function detectLiveIntent(message) {
   const hasStockIntent = isStockQuery(message);
   const hasGoldIntent = isGoldQuery(message);
   const hasHistoricalCryptoIntent = isHistoricalCryptoPriceQuery(message);
+  const queryKind = detectQueryKind(message);
+  const hasNewsStyleIntent = ["sports", "technology_news", "economy_news", "general_news"].includes(queryKind);
 
   const shouldLookup = Boolean(
     hasHistoricalCryptoIntent
@@ -487,6 +518,9 @@ function detectLiveIntent(message) {
     || (hasDataIntent && hasCommodity)
     || (hasDataIntent && hasVehicle)
     || (hasDataIntent && hasEntity)
+    || (hasDataIntent && hasSportsEntity)
+    || (hasSportsEntity && hasSportsSignal)
+    || (hasNewsStyleIntent && (hasDataIntent || hasTemporalIntent || hasLinkIntent || hasSportsSignal))
   );
 
   return {
@@ -500,6 +534,7 @@ function detectLiveIntent(message) {
       hasPriceIntent,
       hasEntity,
       hasSportsEntity,
+      hasSportsSignal,
       hasCommodity,
       hasVehicle,
       hasOfficeIntent,
@@ -889,18 +924,32 @@ function extractDirectUrlContext(raw = "") {
 async function fetchDirectUrlContent(message = "") {
   const url = extractFirstUrl(message);
   if (!url) return null;
-  const raw = await fetchViaJina(url, { accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" });
-  const contextText = extractDirectUrlContext(raw);
+  const fetchProviders = createDefaultFetchProviders();
+  const page = await fetchPage(url, {
+    extractMode: "text",
+    maxChars: 5000,
+    cacheTtlMs: 15 * 60 * 1000,
+    primaryProviders: fetchProviders.primaryProviders,
+    fallbackProviders: fetchProviders.fallbackProviders
+  });
   const host = (() => {
     try { return new URL(url).hostname; } catch { return url; }
   })();
+  const contextText = String(page?.content || "").trim();
+  const errorCode = String(page?.error?.code || "").trim();
   return {
     name: "web.live",
-    summary: `Fetched direct URL via Jina for ${host}. Use the fetched page content to answer the user's actual request, not by echoing raw excerpts.` ,
+    summary: contextText
+      ? `Fetched direct URL via ${page.provider || "web"} for ${host}. Use the fetched page content to answer the user's actual request, not by echoing raw excerpts.`
+      : `Direct URL fetch for ${host} did not return usable content${errorCode ? ` (${errorCode})` : ""}.`,
     contextText,
-    directReply: contextText ? "" : `Saya belum berhasil ambil isi dari ${host}.`,
+    directReply: contextText
+      ? ""
+      : errorCode === "BROWSER_REQUIRED"
+        ? `Halaman ${host} kebaca JS-heavy / protected. Fetch biasa jangan dipaksa; perlu extractor lain atau browser flow.`
+        : `Saya belum berhasil ambil isi dari ${host}.`,
     passToModel: Boolean(contextText),
-    engine: { score: 1, evidence: [{ sourceLabel: "jina", confidence: 1 }] }
+    engine: { score: contextText ? 1 : 0, evidence: [{ sourceLabel: page.provider || "web", confidence: contextText ? 1 : 0.2 }] }
   };
 }
 
@@ -1102,6 +1151,14 @@ function buildFallbackSearchQuery(message, queryKind) {
     return `${normalized} current total`;
   }
 
+  if (queryKind === "sports") {
+    return `${normalized} skor jadwal hasil pertandingan`;
+  }
+
+  if (queryKind === "technology_news" || queryKind === "economy_news" || queryKind === "general_news") {
+    return `${normalized} latest`;
+  }
+
   return `${normalized} live current`;
 }
 
@@ -1144,6 +1201,15 @@ function buildSecondHopSearchQueries(message, queryKind) {
     const simplified = cleanLiveQuery(message);
     queries.push(`${simplified} official`);
     queries.push(`${simplified} current total`);
+  } else if (queryKind === "sports") {
+    const simplified = cleanLiveQuery(message);
+    queries.push(`${simplified} skor`);
+    queries.push(`${simplified} jadwal`);
+    queries.push(`${simplified} hasil pertandingan`);
+  } else if (queryKind === "technology_news" || queryKind === "economy_news" || queryKind === "general_news") {
+    const simplified = cleanLiveQuery(message);
+    queries.push(`${simplified} latest`);
+    queries.push(`${simplified} terbaru`);
   } else if (queryKind === "price" || queryKind === "stock") {
     const simplified = cleanLiveQuery(message);
     const historicalContext = buildHistoricalDateContext(message);
@@ -1260,6 +1326,19 @@ function detectQueryKind(message) {
   if (/\b(berapa jumlah|jumlah|how many|count|total)\b/.test(text) && /\b(provinsi|province|state|kabupaten|regency|kota|city|pulau|island)\b/.test(text)) {
     return "count";
   }
+  if (hasAnyPhrase(text, LIVE_SPORTS_KEYWORDS)
+    || /\b(olahraga|sports?|bola|sepak bola|liga|nba|motogp|f1|badminton|bulu tangkis|pertandingan|match|fixture|jadwal|skor|score|klasemen)\b/.test(text)) {
+    return "sports";
+  }
+  if (/\b(teknologi|technology|tech|ai|openai|chatgpt|gadget|iphone|android|startup|server|cloud|cyber)\b/.test(text)) {
+    return "technology_news";
+  }
+  if (/\b(ekonomi|economy|bisnis|business|inflasi|bank indonesia|market|pasar modal)\b/.test(text)) {
+    return "economy_news";
+  }
+  if (/\b(news|berita|headline|update|terbaru|terkini)\b/.test(text)) {
+    return "general_news";
+  }
   return "price";
 }
 
@@ -1275,6 +1354,10 @@ function classifyLiveCategory(message = "", queryKind = classifyLiveIntent(messa
   if (queryKind === "person_relation") return "person_relation";
   if (queryKind === "count") return "count";
   if (queryKind === "stock") return "stock";
+  if (queryKind === "sports") return "sports_news";
+  if (queryKind === "technology_news") return "technology_news";
+  if (queryKind === "economy_news") return "economy_news";
+  if (queryKind === "general_news") return "general_news";
 
   if (queryKind === "price") {
     if (isHistoricalCryptoPriceQuery(message)) return "crypto_price_historical";
@@ -1294,26 +1377,26 @@ function classifyLiveCategory(message = "", queryKind = classifyLiveIntent(messa
 function sourcePlanForCategory(category = "general_news") {
   switch (category) {
     case "crypto_price_historical":
-      return ["coingecko_historical", "crypto_rss", "search"];
+      return ["coingecko_historical", "x_search", "search", "crypto_rss"];
     case "crypto_price":
-      return ["coingecko", "crypto_rss", "search"];
+      return ["coingecko", "crypto_multi_news", "x_search", "search", "crypto_rss"];
     case "gold_price":
-      return ["logam_mulia", "yahoo_gold", "registry_rss", "search"];
+      return ["logam_mulia", "yahoo_gold", "x_search", "search", "registry_rss"];
     case "staple_price":
-      return ["pihps", "panel_harga_pangan", "registry_rss", "search"];
+      return ["pihps", "panel_harga_pangan", "x_search", "search", "registry_rss"];
     case "technology_news":
     case "sports_news":
     case "economy_news":
     case "general_news":
-      return ["registry_rss", "search"];
+      return ["x_search", "search", "registry_rss"];
     case "person_relation":
-      return ["search", "wikipedia"];
+      return ["wikipedia", "x_search", "search"];
     case "count":
-      return ["search", "wikipedia"];
+      return ["wikipedia", "x_search", "search"];
     case "office":
-      return ["search", "wikipedia"];
+      return ["wikipedia", "x_search", "search"];
     default:
-      return ["search"];
+      return ["x_search", "search"];
   }
 }
 
@@ -1338,17 +1421,24 @@ function sourceBucketForCategory(category = "", queryKind = "") {
 }
 
 function orderSearchPayloadsForCategory(category = "", payloads = {}) {
-  const priority = wikipediaPriorityForCategory(category);
+  const value = String(category || "").trim().toLowerCase();
+  const priority = wikipediaPriorityForCategory(value);
   const ordered = [];
 
-  if (priority === "high") {
+  if (["technology_news", "sports_news", "economy_news", "general_news"].includes(value)) {
+    ordered.push(payloads.google, payloads.registry, payloads.crypto, payloads.wikipedia);
+  } else if (["crypto_price", "crypto_price_historical"].includes(value)) {
+    ordered.push(payloads.google, payloads.crypto, payloads.registry, payloads.wikipedia);
+  } else if (["gold_price", "staple_price", "forex_price", "general_price", "stock"].includes(value)) {
+    ordered.push(payloads.google, payloads.registry, payloads.crypto, payloads.wikipedia);
+  } else if (priority === "high") {
     ordered.push(payloads.wikipedia, payloads.google, payloads.registry, payloads.crypto);
   } else if (priority === "medium") {
-    ordered.push(payloads.google, payloads.wikipedia, payloads.registry, payloads.crypto);
+    ordered.push(payloads.wikipedia, payloads.google, payloads.registry, payloads.crypto);
   } else if (priority === "low") {
     ordered.push(payloads.google, payloads.registry, payloads.crypto, payloads.wikipedia);
   } else {
-    ordered.push(payloads.google, payloads.registry, payloads.crypto);
+    ordered.push(payloads.google, payloads.registry, payloads.crypto, payloads.wikipedia);
   }
 
   return ordered.filter(Boolean);
@@ -1578,6 +1668,10 @@ function buildInconclusiveReply(message, queryKind) {
 
   if (queryKind === "office") {
     return `Menurut data Google News search yang saya dapatkan, jawaban untuk "${subject}" belum cukup jelas. Mau saya cari di sumber lain?`;
+  }
+
+  if (queryKind === "sports") {
+    return `Menurut data Google News search yang saya dapatkan, info olahraga untuk "${subject}" belum cukup jelas. Mau saya cari di sumber lain?`;
   }
 
   return `Menurut data Google News search yang saya dapatkan, jawaban untuk "${subject}" belum cukup jelas. Mau saya cari di sumber lain?`;
@@ -2307,6 +2401,108 @@ function extractRelevantPageExcerpt(pageText, anchors = []) {
   return full.slice(0, 520).trim();
 }
 
+function splitJinaContentBlocks(raw = "") {
+  const cleaned = String(raw || "")
+    .replace(/```[\s\S]*?```/g, "\n")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[|*_`>#]+/g, " ")
+    .replace(/\r/g, "")
+    .replace(/\t/g, " ");
+
+  const paragraphs = cleaned
+    .split(/\n\s*\n+/)
+    .map((block) => block.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  const lineBlocks = cleaned
+    .split("\n")
+    .map((line) => line.replace(/^[-*•]\s+/, "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  return [...new Set([...paragraphs, ...lineBlocks])]
+    .filter((block) => block.length >= 40)
+    .slice(0, 120);
+}
+
+function isLikelyBoilerplateBlock(block = "") {
+  const text = normalizeSearchText(block).toLowerCase();
+  if (!text) return true;
+  const urlLikeCount = (String(block || "").match(/https?:\/\//gi) || []).length;
+  return /^(title|url source|sumber url|markdown content):/.test(text)
+    || /^#{1,6}\s/.test(String(block || "").trim())
+    || /(cookie|newsletter|subscribe|langganan|sign in|log in|advertisement|iklan|all rights reserved|copyright|share this|baca juga|follow us)/.test(text)
+    || /^(published time|updated|author):/i.test(String(block || "").trim())
+    || urlLikeCount >= 2
+    || /^(home|menu|search|next|previous)$/.test(text);
+}
+
+function scoreJinaContentBlock(block = "", anchors = [], queryKind = "") {
+  const text = String(block || "").trim();
+  if (!text || isLikelyBoilerplateBlock(text)) return -Infinity;
+
+  const anchorMatches = countAnchorMatches(text, anchors);
+  const sentenceCount = text.split(/(?<=[.!?])\s+/).filter(Boolean).length;
+  const priceSignal = /\b(?:rp|idr|usd|harga|price|naik|turun)\b/i.test(text) ? 1 : 0;
+  const officeSignal = /\b(?:presiden|wakil presiden|menteri|governor|gubernur|ceo|pm|prime minister)\b/i.test(text) ? 1 : 0;
+  const sportsSignal = /\b(?:score|skor|menang|kalah|jadwal|kickoff|klasemen)\b/i.test(text) ? 1 : 0;
+  const freshnessSignal = /\b(?:hari ini|today|current|latest|update|updated|published|dipublikasikan)\b/i.test(text) ? 1 : 0;
+
+  let score = 0;
+  score += anchorMatches * 8;
+  score += freshnessSignal * 2;
+  if (text.length >= 90 && text.length <= 420) score += 3;
+  if (text.length > 420 && text.length <= 900) score += 1;
+  if (sentenceCount >= 1 && sentenceCount <= 4) score += 2;
+  if (queryKind === "price") score += priceSignal * 4;
+  if (queryKind === "office") score += officeSignal * 4;
+  if (queryKind === "sports") score += sportsSignal * 3;
+  if (!anchors.length) score += 1;
+  return score;
+}
+
+function extractAdaptiveSnippetFromJina(raw = "", options = {}) {
+  const anchors = Array.isArray(options.anchors) ? options.anchors.filter(Boolean) : [];
+  const queryKind = String(options.queryKind || "").trim().toLowerCase();
+  const blocks = splitJinaContentBlocks(raw)
+    .filter((block) => !isLikelyBoilerplateBlock(block))
+    .map((block, index) => ({
+      index,
+      block,
+      anchorMatches: countAnchorMatches(block, anchors),
+      score: scoreJinaContentBlock(block, anchors, queryKind)
+    }))
+    .filter((item) => Number.isFinite(item.score));
+
+  if (!blocks.length) return null;
+
+  const ranked = [...blocks].sort((a, b) => b.score - a.score || a.index - b.index);
+  const best = ranked[0];
+  if (!best) return null;
+
+  const companions = ranked
+    .filter((item) => item.index !== best.index)
+    .filter((item) => Math.abs(item.index - best.index) <= 2)
+    .filter((item) => item.anchorMatches > 0 || Math.abs(item.block.length - best.block.length) <= 140)
+    .slice(0, 2);
+
+  const selected = [best, ...companions]
+    .sort((a, b) => a.index - b.index)
+    .map((item) => item.block);
+
+  const snippet = selected.join(" ").replace(/\s+/g, " ").trim();
+  if (snippet) return snippet.slice(0, 800);
+
+  return blocks
+    .slice(0, 2)
+    .map((item) => item.block)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 800);
+}
+
 function buildSearchSummary(query, payload, message) {
   const anchors = buildCardAnchors(message, query);
   const parts = [
@@ -2560,31 +2756,25 @@ ${evidenceSummary}` : "", best ? `Current-data confidence: ${currentDataConfiden
  * Fetch top article URL from RSS results via Jina Reader to get real content snippet.
  * Only runs when Jina API key is configured. Returns enriched snippet or null.
  */
-async function fetchArticleSnippetViaJina(url) {
+async function fetchArticleSnippetViaJina(url, options = {}) {
   if (!JINA_API_KEY || !url || !/^https?:\/\//i.test(url)) return null;
   try {
     const raw = await fetchViaJina(url, { accept: "text/html,application/xhtml+xml" });
     if (!raw || raw.length < 200) return null;
-    // Extract first meaningful paragraphs (skip navigation/headers)
-    const lines = raw
-      .replace(/```[\s\S]*?```/g, "")
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 40 && !/^(title|url source|sumber url|markdown content):/i.test(l))
-      .filter((l) => !/^#{1,3}\s/.test(l));  // skip markdown headings
-    return lines.slice(0, 6).join(" ").substring(0, 800) || null;
+
+    const anchors = Array.isArray(options.anchors) ? options.anchors : [];
+    return extractAdaptiveSnippetFromJina(raw, {
+      anchors,
+      queryKind: options.queryKind
+    });
   } catch {
     return null;
   }
 }
 
-async function fetchSearchResults(client, query) {
-  // Append current year to bias Google News toward fresh results
-  const currentYear = new Date().getFullYear();
-  const freshQuery = /\b\d{4}\b/.test(query) ? query : `${query} ${currentYear}`;
-
+async function fetchSearchResults(client, query, options = {}) {
   const response = await client.get(GOOGLE_NEWS_RSS_URL, {
-    params: { q: freshQuery, hl: "id", gl: "ID", ceid: "ID:id" }
+    params: { q: query, hl: "id", gl: "ID", ceid: "ID:id" }
   });
   const parsed = extractSearchResults(response.data);
 
@@ -2596,7 +2786,10 @@ async function fetchSearchResults(client, query) {
       .sort((a, b) => (a.ageMs || 0) - (b.ageMs || 0));
     const topResult = candidates[0] || parsed.results.find((r) => r.url && /^https?:\/\//i.test(r.url));
     if (topResult) {
-      const articleSnippet = await fetchArticleSnippetViaJina(topResult.url).catch(() => null);
+      const articleSnippet = await fetchArticleSnippetViaJina(topResult.url, {
+        anchors: buildQueryAnchors(options.message || query, query),
+        queryKind: options.queryKind
+      }).catch(() => null);
       if (articleSnippet) {
         topResult.snippet = articleSnippet;
         parsed.pageText = parsed.results
@@ -2752,6 +2945,24 @@ function mergeSearchPayloads(...payloads) {
   };
 }
 
+function evaluateSearchPayload(message, queryKind, query, searchPayload, options = {}) {
+  if (!searchPayload?.results?.length) return null;
+  const results = searchPayload.results;
+  const cardCandidate = extractFromSearchSummary(message, queryKind, query, searchPayload, { routeCategory: options.routeCategory });
+  const resultsCandidate = extractFromSearchResults(message, queryKind, results, searchPayload, query, { routeCategory: options.routeCategory });
+  return decideLiveOutcome(message, queryKind, query, searchPayload, [cardCandidate, resultsCandidate], {
+    secondHop: options.secondHop,
+    synthesisOnly: Boolean(options.synthesisOnly)
+  });
+}
+
+function isUsefulOutcome(outcome) {
+  if (!outcome) return false;
+  if ((outcome.engine?.score || 0) > 0) return true;
+  if (String(outcome.directReply || '').trim() && !/belum cukup jelas/i.test(String(outcome.directReply || ''))) return true;
+  return false;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2785,6 +2996,7 @@ function finalizeToolRouteResult(result, options = {}) {
     name: "web.live",
     summary: `${result.summary}\nBest extracted candidate: ${stripReplySource(result.directReply)}.`.trim(),
     directReply: "",
+    ...(result?.contextText ? { contextText: result.contextText } : {}),
     ...(metadata ? { _routeMeta: metadata } : {})
   };
 }
@@ -2802,7 +3014,9 @@ async function resolveCategorySources({ client, message, route, options = {} }) 
   for (const source of route.sources || []) {
     let candidate = null;
 
-    if (source === "coingecko") {
+    if (source === "crypto_multi_news") {
+      candidate = await withRetry(() => runCryptoNewsLookup(message), { attempts: 2 }).catch(() => null);
+    } else if (source === "coingecko") {
       candidate = await withRetry(() => fetchCoinGeckoCryptoPrice(client, message), { attempts: 3 }).catch(() => null);
     } else if (source === "coingecko_historical") {
       candidate = await withRetry(() => fetchCoinGeckoHistoricalCryptoPrice(client, message), { attempts: 3 }).catch(() => null);
@@ -2834,6 +3048,46 @@ async function resolveCategorySources({ client, message, route, options = {} }) 
   return fallbackCandidate;
 }
 
+function createRouteSearchProviders(client, message, route, queryKind) {
+  const defaults = createDefaultSearchProviders({ client, message, route, queryKind });
+  const xDefaults = createDefaultXSearchProviders();
+  const primaryProviders = [...defaults.primaryProviders];
+  const fallbackProviders = [...defaults.fallbackProviders];
+  const xPrimaryProviders = route.sources.includes("x_search") ? [...xDefaults.primaryProviders] : [];
+  const xFallbackProviders = route.sources.includes("x_search") ? [...xDefaults.fallbackProviders] : [];
+
+  if (route.sources.includes("search")) {
+    primaryProviders.length = 0;
+    primaryProviders.push(createSearchProvider({
+      id: "google_news",
+      search: async (query) => await withRetry(() => fetchSearchResults(client, query, { message, queryKind }), { attempts: 3 })
+    }));
+  }
+
+  if (route.sources.includes("registry_rss")) {
+    fallbackProviders.push(createSearchProvider({
+      id: "registry_rss",
+      search: async (query) => await withRetry(() => fetchRegistryRssResults(client, query, message, route.category), { attempts: 2 })
+    }));
+  }
+
+  if (route.sources.includes("crypto_rss")) {
+    fallbackProviders.push(createSearchProvider({
+      id: "crypto_rss",
+      search: async (query) => await withRetry(() => fetchCryptoRssResults(client, query), { attempts: 3 })
+    }));
+  }
+
+  if (route.sources.includes("wikipedia")) {
+    fallbackProviders.push(createSearchProvider({
+      id: "wikipedia",
+      search: async (query) => await withRetry(() => fetchWikipediaResults(client, query), { attempts: 2 })
+    }));
+  }
+
+  return { primaryProviders, fallbackProviders, xPrimaryProviders, xFallbackProviders };
+}
+
 async function runSingleWebLiveLookup(message, options = {}) {
   const secondHop = Boolean(options.secondHop);
   const liveIntent = detectLiveIntent(message);
@@ -2860,7 +3114,7 @@ async function runSingleWebLiveLookup(message, options = {}) {
   const queryKind = route.intent;
   const routeCandidate = await resolveCategorySources({ client, message, route, options });
   if (isSubstantiveToolRouteResult(routeCandidate)) {
-    return routeCandidate;
+    return finalizeToolRouteResult(routeCandidate, options);
   }
 
   // Use LLM-generated query if provided (authoritative), fallback to built queries
@@ -2871,33 +3125,48 @@ async function runSingleWebLiveLookup(message, options = {}) {
       ? buildSecondHopSearchQueries(message, queryKind)
       : [buildSearchQuery(message), buildFallbackSearchQuery(message, queryKind)];
 
+  const { primaryProviders, fallbackProviders, xPrimaryProviders, xFallbackProviders } = createRouteSearchProviders(client, message, route, queryKind);
+
   let selectedQuery = "";
-  let searchPayload = null;
+  let selectedOutcome = null;
   for (const query of queries) {
-    const googlePayload = await withRetry(() => fetchSearchResults(client, query), { attempts: 3 });
-    const registryPayload = route.sources.includes("registry_rss")
-      ? await withRetry(() => fetchRegistryRssResults(client, query, message, route.category), { attempts: 2 }).catch(() => null)
+    const xSearchResponse = (xPrimaryProviders.length || xFallbackProviders.length)
+      ? await xSearch(query, {
+          primaryProviders: xPrimaryProviders,
+          fallbackProviders: xFallbackProviders,
+          cacheTtlMs: 15 * 60 * 1000,
+          mergeAcrossProviders: true
+        }).catch(() => null)
       : null;
-    const cryptoPayload = route.sources.includes("crypto_rss")
-      ? await withRetry(() => fetchCryptoRssResults(client, query), { attempts: 3 })
-      : null;
-    const wikipediaPayload = route.sources.includes("wikipedia")
-      ? await withRetry(() => fetchWikipediaResults(client, query), { attempts: 2 }).catch(() => null)
-      : null;
-    const payload = mergeSearchPayloads(...orderSearchPayloadsForCategory(route.category, {
-      google: googlePayload,
-      registry: registryPayload,
-      crypto: cryptoPayload,
-      wikipedia: wikipediaPayload
-    }));
-    if (payload.results.length) {
+
+    const searchResponse = await searchWeb(query, {
+      primaryProviders,
+      fallbackProviders,
+      cacheTtlMs: 15 * 60 * 1000,
+      mergeAcrossProviders: true
+    }).catch(() => null);
+
+    const payloads = [xSearchResponse?.payload, searchResponse?.payload].filter((payload) => payload?.results?.length);
+    const categoryPayload = payloads.length
+      ? mergePayloads(payloads)
+      : (searchResponse?.payload || xSearchResponse?.payload || null);
+
+    if (categoryPayload?.results?.length) {
+      const categoryOutcome = evaluateSearchPayload(message, queryKind, query, categoryPayload, {
+        routeCategory: route.category,
+        secondHop,
+        synthesisOnly: Boolean(options.synthesisOnly)
+      });
       selectedQuery = query;
-      searchPayload = payload;
-      break;
+      if (isUsefulOutcome(categoryOutcome)) {
+        selectedOutcome = categoryOutcome;
+        break;
+      }
+      selectedOutcome = categoryOutcome;
     }
   }
 
-  if (!searchPayload?.results?.length) {
+  if (!selectedOutcome) {
     if (routeCandidate) return routeCandidate;
     return {
       name: "web.live",
@@ -2907,13 +3176,7 @@ async function runSingleWebLiveLookup(message, options = {}) {
     };
   }
 
-  const results = searchPayload.results;
-  const cardCandidate = extractFromSearchSummary(message, queryKind, selectedQuery, searchPayload, { routeCategory: route.category });
-  const resultsCandidate = extractFromSearchResults(message, queryKind, results, searchPayload, selectedQuery, { routeCategory: route.category });
-  return decideLiveOutcome(message, queryKind, selectedQuery, searchPayload, [cardCandidate, resultsCandidate], {
-    secondHop,
-    synthesisOnly: Boolean(options.synthesisOnly)
-  });
+  return selectedOutcome;
 }
 
 async function runMultiOfficeWebLiveLookup(message, options = {}) {
