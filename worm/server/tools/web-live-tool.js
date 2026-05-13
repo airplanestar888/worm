@@ -214,6 +214,23 @@ const LIVE_SPORTS_KEYWORDS = [
   "soccer"
 ];
 
+const SPORTS_TEAM_PROFILES = [
+  {
+    name: "Persib Bandung",
+    aliases: ["persib", "persib bandung"],
+    leagueSlug: "idn.1",
+    espnId: "8293",
+    sourceLabel: "ESPN"
+  },
+  {
+    name: "Persija Jakarta",
+    aliases: ["persija", "persija jakarta"],
+    leagueSlug: "idn.1",
+    espnId: "8030",
+    sourceLabel: "ESPN"
+  }
+];
+
 const LIVE_SPORTS_SIGNAL_KEYWORDS = [
   "hasil pertandingan",
   "hasil laga",
@@ -1203,6 +1220,12 @@ function buildSecondHopSearchQueries(message, queryKind) {
     queries.push(`${simplified} current total`);
   } else if (queryKind === "sports") {
     const simplified = cleanLiveQuery(message);
+    const teamProfile = findSportsTeamProfile(message);
+    if (teamProfile) {
+      queries.push(`${teamProfile.name} jadwal pertandingan berikutnya ${new Date().getFullYear()}`);
+      queries.push(`${teamProfile.name} fixtures ${new Date().getFullYear()}`);
+      queries.push(`${teamProfile.name} pertandingan tersisa ${new Date().getFullYear()}`);
+    }
     queries.push(`${simplified} skor`);
     queries.push(`${simplified} jadwal`);
     queries.push(`${simplified} hasil pertandingan`);
@@ -1229,7 +1252,7 @@ function buildSecondHopSearchQueries(message, queryKind) {
 
 function stripReplySource(text = "") {
   return String(text || "")
-    .replace(/\s*(?:Sumber|Source):\s*[^\n.]+\.?$/i, "")
+    .replace(/\s*(?:Sumber|Source):\s*[^\n]+\.?$/i, "")
     .trim();
 }
 
@@ -1388,7 +1411,9 @@ function sourcePlanForCategory(category = "general_news") {
     case "sports_news":
     case "economy_news":
     case "general_news":
-      return ["x_search", "search", "registry_rss"];
+      return category === "sports_news"
+        ? ["sports_fixture", "x_search", "search", "registry_rss"]
+        : ["x_search", "search", "registry_rss"];
     case "person_relation":
       return ["wikipedia", "x_search", "search"];
     case "count":
@@ -1447,10 +1472,11 @@ function orderSearchPayloadsForCategory(category = "", payloads = {}) {
 function resolveLiveRoute(message = "", options = {}) {
   const intent = classifyLiveIntent(message);
   const category = classifyLiveCategory(message, intent, String(options.categoryHint || "").trim().toLowerCase());
+  const sources = sourcePlanForCategory(category);
   return {
     intent,
     category,
-    sources: sourcePlanForCategory(category)
+    sources
   };
 }
 
@@ -2986,6 +3012,316 @@ async function withRetry(task, options = {}) {
   throw lastError || new Error("Retry failed.");
 }
 
+function findSportsTeamProfile(message = "") {
+  const text = normalizeSearchText(message).toLowerCase();
+  return SPORTS_TEAM_PROFILES.find((profile) => profile.aliases.some((alias) => hasPhrase(text, alias))) || null;
+}
+
+function isRemainingFixtureQuestion(message = "") {
+  return /\b(sisa|tersisa|remaining|left|berapa pertandingan lagi|pertandingan tersisa)\b/i.test(normalizeSearchText(message));
+}
+
+function isNextFixtureQuestion(message = "") {
+  return /\b(kapan|main lagi|berikutnya|selanjutnya|next|jadwal)\b/i.test(normalizeSearchText(message));
+}
+
+function formatFixtureDateTime(date, timeValid = true) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  const formatter = new Intl.DateTimeFormat("id-ID", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    hour: timeValid ? "2-digit" : undefined,
+    minute: timeValid ? "2-digit" : undefined,
+    hour12: false,
+    timeZone: "Asia/Jakarta"
+  });
+  const formatted = formatter.format(date).replace(/\./g, ":");
+  return timeValid ? `${formatted} WIB` : formatted;
+}
+
+function normalizeEspnFixture(event = {}) {
+  const competition = Array.isArray(event.competitions) ? event.competitions[0] : null;
+  const competitors = Array.isArray(competition?.competitors) ? competition.competitors : [];
+  const home = competitors.find((item) => item.homeAway === "home");
+  const away = competitors.find((item) => item.homeAway === "away");
+  const homeName = cleanName(home?.team?.displayName || home?.team?.name || "");
+  const awayName = cleanName(away?.team?.displayName || away?.team?.name || "");
+  const date = new Date(event.date || competition?.date || "");
+  if (!homeName || !awayName || Number.isNaN(date.getTime())) return null;
+
+  return {
+    date,
+    timeValid: event.timeValid !== false && competition?.timeValid !== false,
+    match: `${homeName} vs ${awayName}`,
+    competition: cleanName(event.seasonType?.name || event.season?.displayName || competition?.type?.text || "Indonesian Super League"),
+    venue: cleanName(competition?.venue?.fullName || ""),
+    status: cleanName(event.status?.type?.description || competition?.status?.type?.description || ""),
+    url: cleanName(event.links?.[0]?.href || "")
+  };
+}
+
+function parseEspnFixturePageDate(dateText = "", timeText = "") {
+  const dateMatch = String(dateText || "").match(/\b(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat),\s+([A-Za-z]+)\s+(\d{1,2})\b/i);
+  if (!dateMatch) return null;
+  const monthMap = {
+    jan: 0,
+    january: 0,
+    feb: 1,
+    february: 1,
+    mar: 2,
+    march: 2,
+    apr: 3,
+    april: 3,
+    may: 4,
+    jun: 5,
+    june: 5,
+    jul: 6,
+    july: 6,
+    aug: 7,
+    august: 7,
+    sep: 8,
+    sept: 8,
+    september: 8,
+    oct: 9,
+    october: 9,
+    nov: 10,
+    november: 10,
+    dec: 11,
+    december: 11
+  };
+  const month = monthMap[String(dateMatch[1] || "").toLowerCase()];
+  const day = Number(dateMatch[2]);
+  if (!Number.isFinite(month) || !Number.isFinite(day)) return null;
+
+  const now = new Date();
+  let year = now.getUTCFullYear();
+  if (month + 1 < now.getUTCMonth() && now.getUTCMonth() >= 9) year += 1;
+
+  const timeMatch = String(timeText || "").match(/\b(\d{1,2}):(\d{2})\s*(AM|PM)\b/i);
+  if (!timeMatch) return { date: new Date(Date.UTC(year, month, day)), timeValid: false };
+
+  let hour = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2]);
+  const meridiem = String(timeMatch[3] || "").toUpperCase();
+  if (meridiem === "PM" && hour < 12) hour += 12;
+  if (meridiem === "AM" && hour === 12) hour = 0;
+
+  // ESPN fixture pages display soccer times in US Eastern time for this endpoint.
+  const easternUtcOffset = month >= 2 && month <= 10 ? 4 : 5;
+  return {
+    date: new Date(Date.UTC(year, month, day, hour + easternUtcOffset, minute)),
+    timeValid: true
+  };
+}
+
+function parseIndonesianFixtureDateTime(dateText = "", timeText = "") {
+  const monthMap = {
+    januari: 0,
+    februari: 1,
+    maret: 2,
+    april: 3,
+    mei: 4,
+    juni: 5,
+    juli: 6,
+    agustus: 7,
+    september: 8,
+    oktober: 9,
+    november: 10,
+    desember: 11
+  };
+  const dateMatch = String(dateText || "").trim().match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/i);
+  if (!dateMatch) return null;
+  const day = Number(dateMatch[1]);
+  const month = monthMap[String(dateMatch[2] || "").toLowerCase()];
+  const year = Number(dateMatch[3]);
+  if (!Number.isFinite(day) || !Number.isFinite(month) || !Number.isFinite(year)) return null;
+
+  const timeMatch = String(timeText || "").match(/(\d{1,2}):(\d{2})/);
+  if (!timeMatch) return { date: new Date(Date.UTC(year, month, day)), timeValid: false };
+  const hourWib = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2]);
+  return {
+    date: new Date(Date.UTC(year, month, day, hourWib - 7, minute)),
+    timeValid: true
+  };
+}
+
+function extractEspnFixturePageRows(html = "") {
+  const rows = [];
+  const rowBlocks = String(html || "").match(/<tr\b[\s\S]*?<\/tr>/gi) || [];
+  for (const row of rowBlocks) {
+    if (!/data-testid="date"/i.test(row) || !/data-testid="localTeam"/i.test(row) || !/data-testid="awayTeam"/i.test(row)) continue;
+    const dateText = stripHtml(row.match(/data-testid="date"[^>]*>([\s\S]*?)<\/div>/i)?.[1] || "");
+    const localBlock = row.match(/data-testid="localTeam"[\s\S]*?<\/div>/i)?.[0] || "";
+    const awayBlock = row.match(/data-testid="awayTeam"[\s\S]*?<\/div>/i)?.[0] || "";
+    const localTeam = cleanName(stripHtml(localBlock));
+    const awayTeam = cleanName(stripHtml(awayBlock));
+    const links = Array.from(row.matchAll(/<a\b[\s\S]*?>([\s\S]*?)<\/a>/gi)).map((match) => stripHtml(match[1]));
+    const timeText = links.find((item) => /\b\d{1,2}:\d{2}\s*(AM|PM)\b/i.test(item)) || "";
+    const competition = stripHtml(row.match(/<span>(Indonesian[\s\S]*?League)<\/span>/i)?.[1] || "Indonesian Super League");
+    const parsedDate = parseEspnFixturePageDate(dateText, timeText);
+    if (!parsedDate || !localTeam || !awayTeam) continue;
+    rows.push({
+      date: parsedDate.date,
+      timeValid: parsedDate.timeValid,
+      match: `${localTeam} vs ${awayTeam}`,
+      competition,
+      venue: "",
+      status: "",
+      url: ""
+    });
+  }
+  return rows;
+}
+
+async function fetchEspnFixturePageFixtures(client, profile) {
+  const url = `https://www.espn.com/soccer/team/fixtures/_/id/${profile.espnId}/${encodeURIComponent(profile.aliases[0])}`;
+  const response = await axios.get(url, {
+    timeout: 12000,
+    proxy: false,
+    headers: {
+      Accept: "text/html,application/xhtml+xml",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+  });
+  return extractEspnFixturePageRows(response.data);
+}
+
+function extractLigaIdScheduleRows(html = "", profile) {
+  const rows = [];
+  const rowBlocks = String(html || "").match(/<tr\b[\s\S]*?<\/tr>/gi) || [];
+  const aliasRegex = new RegExp(profile.aliases.map(escapeRegex).join("|"), "i");
+  for (const row of rowBlocks) {
+    if (!aliasRegex.test(row)) continue;
+    const cells = Array.from(row.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)).map((match) => stripHtml(match[1]));
+    if (cells.length < 5) continue;
+    const parsedDate = parseIndonesianFixtureDateTime(cells[0], cells[1]);
+    const match = cleanName(cells[2].replace(/\s+vs\s+/i, " vs "));
+    const status = cleanName(cells[4]);
+    if (!parsedDate || !/\bvs\b/i.test(match)) continue;
+    rows.push({
+      date: parsedDate.date,
+      timeValid: parsedDate.timeValid,
+      match,
+      competition: "Liga 1 Indonesia",
+      venue: "",
+      status,
+      url: ""
+    });
+  }
+  return rows;
+}
+
+async function fetchLigaIdScheduleFixtures(profile) {
+  const response = await axios.get("https://www.liga.id/liga-indonesia/jadwal-2026/", {
+    timeout: 12000,
+    proxy: false,
+    headers: {
+      Accept: "text/html,application/xhtml+xml",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+  });
+  return extractLigaIdScheduleRows(response.data, profile);
+}
+
+function buildSportsFixtureSummary(profile, fixtures, message, sourceLabel = "ESPN") {
+  const upcoming = fixtures.slice(0, 5);
+  const lines = upcoming.map((fixture, index) => {
+    const venue = fixture.venue ? `, venue: ${fixture.venue}` : "";
+    return `${index + 1}. ${formatFixtureDateTime(fixture.date, fixture.timeValid)}: ${fixture.match}${venue}`;
+  });
+  const intentLine = isRemainingFixtureQuestion(message)
+    ? `Remaining fixture count after today: ${fixtures.length}.`
+    : isNextFixtureQuestion(message)
+      ? "Use fixture #1 as the next match. Do not skip to later fixtures unless fixture #1 is already completed."
+      : "";
+  return [
+    `Structured football fixture data for ${profile.name} from ${sourceLabel}.`,
+    intentLine,
+    "Upcoming fixtures after the current date:",
+    ...lines
+  ].filter(Boolean).join("\n");
+}
+
+function buildSportsFixtureReply(profile, fixtures, source, message) {
+  const next = fixtures[0];
+  if (!next) return "";
+  const topThree = fixtures.slice(0, 3)
+    .map((fixture) => `- ${formatFixtureDateTime(fixture.date, fixture.timeValid)}: ${fixture.match}`)
+    .join("\n");
+
+  if (isRemainingFixtureQuestion(message)) {
+    return [
+      `${profile.name} masih punya ${fixtures.length} pertandingan tersisa menurut jadwal yang saya temukan.`,
+      topThree,
+      `Sumber: ${source}.`
+    ].join("\n");
+  }
+
+  return [
+    `Jadwal ${profile.name} berikutnya adalah ${next.match}, ${formatFixtureDateTime(next.date, next.timeValid)}.`,
+    `Sumber: ${source}.`
+  ].join("\n");
+}
+
+async function fetchSportsFixtureData(client, message) {
+  const profile = findSportsTeamProfile(message);
+  if (!profile) return null;
+
+  const url = `https://site.api.espn.com/apis/site/v2/sports/soccer/${profile.leagueSlug}/teams/${profile.espnId}/schedule`;
+  const response = await client.get(url, {
+    timeout: 10000,
+    headers: {
+      Accept: "application/json"
+    }
+  });
+  const events = Array.isArray(response?.data?.events) ? response.data.events : [];
+  const now = new Date();
+  let fixtures = events
+    .map(normalizeEspnFixture)
+    .filter(Boolean)
+    .filter((fixture) => fixture.date.getTime() >= now.getTime() - 60 * 60 * 1000)
+    .sort((a, b) => a.date - b.date);
+  let sourceLabel = profile.sourceLabel;
+
+  if (!fixtures.length) {
+    const ligaFixtures = await fetchLigaIdScheduleFixtures(profile).catch(() => []);
+    fixtures = ligaFixtures
+      .filter((fixture) => fixture.date.getTime() >= now.getTime() - 60 * 60 * 1000)
+      .sort((a, b) => a.date - b.date);
+    if (fixtures.length) sourceLabel = "Liga.id";
+  }
+
+  if (!fixtures.length) {
+    fixtures = (await fetchEspnFixturePageFixtures(client, profile).catch(() => []))
+      .filter((fixture) => fixture.date.getTime() >= now.getTime() - 60 * 60 * 1000)
+      .sort((a, b) => a.date - b.date);
+    if (fixtures.length) sourceLabel = profile.sourceLabel;
+  }
+
+  if (!fixtures.length) return null;
+
+  const directReply = buildSportsFixtureReply(profile, fixtures, sourceLabel, message);
+  const summary = buildSportsFixtureSummary(profile, fixtures, message, sourceLabel);
+  return {
+    name: "web.live",
+    summary,
+    directReply,
+    contextText: summary,
+    engine: {
+      score: 0.92,
+      evidence: [{
+        sourceLabel,
+        sourceType: "publisher",
+        confidence: 0.92,
+        evidence: summary
+      }]
+    }
+  };
+}
+
 function finalizeToolRouteResult(result, options = {}) {
   if (!result) return null;
   const metadata = result && typeof result === "object" ? result._routeMeta || null : null;
@@ -3031,6 +3367,8 @@ async function resolveCategorySources({ client, message, route, options = {} }) 
       candidate = rawCandidate
         ? { ...rawCandidate, _routeMeta: { source, category: route.category, isFallback: true } }
         : null;
+    } else if (source === "sports_fixture") {
+      candidate = await withRetry(() => fetchSportsFixtureData(client, message), { attempts: 2 }).catch(() => null);
     }
 
     if (!candidate) continue;
@@ -3114,7 +3452,7 @@ async function runSingleWebLiveLookup(message, options = {}) {
   const queryKind = route.intent;
   const routeCandidate = await resolveCategorySources({ client, message, route, options });
   if (isSubstantiveToolRouteResult(routeCandidate)) {
-    return finalizeToolRouteResult(routeCandidate, options);
+    return routeCandidate;
   }
 
   // Use LLM-generated query if provided (authoritative), fallback to built queries
