@@ -22,6 +22,10 @@ const NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL || "https://integrate.api.nv
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
 const NVIDIA_MODEL = process.env.NVIDIA_MODEL || "stepfun-ai/step-3.5-flash";
 const NVIDIA_CONTEXT_TOKENS = Number(process.env.NVIDIA_CONTEXT_TOKENS || 64000);
+const HERMES_BASE_URL = process.env.HERMES_BASE_URL || "http://139.255.47.220:8642/v1";
+const HERMES_API_KEY = process.env.HERMES_API_KEY || "";
+const HERMES_MODEL = process.env.HERMES_MODEL || "grok-4.3";
+const HERMES_CONTEXT_TOKENS = Number(process.env.HERMES_CONTEXT_TOKENS || 64000);
 const GOOGLE_NEWS_RSS_URL = process.env.GOOGLE_NEWS_RSS_URL || "https://news.google.com/rss/search";
 const JINA_BASE_URL = process.env.JINA_BASE_URL || "https://r.jina.ai/http://";
 const JINA_API_KEY = process.env.JINA_API_KEY || "";
@@ -95,7 +99,8 @@ const STATIC_DIR = path.join(__dirname, "static");
 const HOME_WORKSPACE = "Home";
 const PROVIDER_DEFAULTS = {
   ollama: OLLAMA_MODEL,
-  nvidia: NVIDIA_MODEL
+  nvidia: NVIDIA_MODEL,
+  hermes: HERMES_MODEL
 };
 const WEB_PROVIDER_REGISTRY = parseJsonEnv("WEB_PROVIDER_REGISTRY", {
   search: ["google_news"],
@@ -119,6 +124,10 @@ module.exports = {
   NVIDIA_API_KEY,
   NVIDIA_MODEL,
   NVIDIA_CONTEXT_TOKENS,
+  HERMES_BASE_URL,
+  HERMES_API_KEY,
+  HERMES_MODEL,
+  HERMES_CONTEXT_TOKENS,
   GOOGLE_NEWS_RSS_URL,
   JINA_BASE_URL,
   JINA_API_KEY,

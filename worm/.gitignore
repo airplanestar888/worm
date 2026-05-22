@@ -1,6 +1,6 @@
 .env
+.env.bak*
 node_modules/
 data/
 *.log
 npm-debug.log*
-

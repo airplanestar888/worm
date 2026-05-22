@@ -100,18 +100,21 @@ function acquireTelegramPollingLock() {
 }
 
 function resolveTelegramProvider() {
-  return TELEGRAM_PROVIDER === "nvidia" ? "nvidia" : "ollama";
+  return ["ollama", "nvidia", "hermes"].includes(TELEGRAM_PROVIDER) ? TELEGRAM_PROVIDER : "ollama";
 }
 
 function providerLabelToKey(label = "") {
   const text = String(label || "").trim().toLowerCase();
   if (text === "cloud") return "nvidia";
   if (text === "local") return "ollama";
+  if (text === "hermes") return "hermes";
   return "";
 }
 
 function providerKeyToLabel(provider = "") {
-  return provider === "nvidia" ? "Cloud" : "Local";
+  if (provider === "nvidia") return "Cloud";
+  if (provider === "hermes") return "Hermes";
+  return "Local";
 }
 
 function resolveTelegramModel(provider) {
@@ -298,7 +301,7 @@ async function sendProviderMenu(chatId) {
   await sendTelegramMenu(
     chatId,
     `Provider aktif: ${providerKeyToLabel(provider)}\nModel aktif: ${model}\n\nPilih provider:`,
-    [["Local", "Cloud"]]
+    [["Local", "Cloud"], ["Hermes"]]
   );
 }
 

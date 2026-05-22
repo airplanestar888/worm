@@ -71,6 +71,21 @@ app.get("/api/health", async (_req, res) => {
     }
   }
 
+  if (process.env.HERMES_API_KEY) {
+    try {
+      const hermesModels = await getProviderModels("hermes");
+      providers.push({ id: "hermes", ok: true, defaultModel: defaultModelFor("hermes"), models: hermesModels });
+    } catch (err) {
+      providers.push({
+        id: "hermes",
+        ok: false,
+        defaultModel: defaultModelFor("hermes"),
+        error: describeError(err),
+        models: [defaultModelFor("hermes")]
+      });
+    }
+  }
+
   const ok = providers.some((provider) => provider.ok);
   res.status(ok ? 200 : 500).json({ ok, app: "worm", port: PORT, providers });
 });
@@ -101,10 +116,11 @@ app.get("/api/sessions", (_req, res) => {
 
 app.post("/api/sessions", (req, res) => {
   const provider = String(req.body?.provider || "ollama").trim().toLowerCase();
+  const resolvedProvider = PROVIDER_DEFAULTS[provider] ? provider : "ollama";
   const session = createSession({
     workspace: req.body?.workspace || "Home",
-    provider,
-    model: req.body?.model || PROVIDER_DEFAULTS[provider] || defaultModelFor("ollama"),
+    provider: resolvedProvider,
+    model: req.body?.model || PROVIDER_DEFAULTS[resolvedProvider] || defaultModelFor("ollama"),
     surfaceMode: req.body?.surfaceMode || "deep_surf"
   });
   res.json({ ok: true, session });

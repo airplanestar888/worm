@@ -1,6 +1,7 @@
 const {
   CONTEXT_TOKEN_RESERVE,
   HOME_WORKSPACE,
+  HERMES_CONTEXT_TOKENS,
   NVIDIA_CONTEXT_TOKENS,
   OLLAMA_CONTEXT_TOKENS,
   PROVIDER_DEFAULTS
@@ -16,6 +17,7 @@ const { readSoulPrompt } = require("../soul");
 const { buildCurrentTimeSystemLine, resolveToolContext } = require("./tool-service");
 const {
   isProviderConfigured,
+  streamHermesChat,
   streamNvidiaChat,
   streamOllamaChat
 } = require("./provider-service");
@@ -36,7 +38,11 @@ function estimateTokens(text) {
 }
 
 function providerContextBudget(provider) {
-  const base = provider === "nvidia" ? NVIDIA_CONTEXT_TOKENS : OLLAMA_CONTEXT_TOKENS;
+  const base = provider === "nvidia"
+    ? NVIDIA_CONTEXT_TOKENS
+    : provider === "hermes"
+      ? HERMES_CONTEXT_TOKENS
+      : OLLAMA_CONTEXT_TOKENS;
   return Math.max(1024, base - CONTEXT_TOKEN_RESERVE);
 }
 
@@ -211,9 +217,9 @@ async function openProviderStreamWithRetry({ provider, model, messages, mode, at
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return provider === "nvidia"
-        ? await streamNvidiaChat({ model, messages, mode })
-        : await streamOllamaChat({ model, messages, mode });
+      if (provider === "nvidia") return await streamNvidiaChat({ model, messages, mode });
+      if (provider === "hermes") return await streamHermesChat({ model, messages, mode });
+      return await streamOllamaChat({ model, messages, mode });
     } catch (err) {
       lastError = err;
       const detail = describeError(err, `${provider.toUpperCase()} request failed for ${model}`);
@@ -256,7 +262,7 @@ function buildDeepSurfInstruction(surfaceMode) {
 function collectProviderStream(streamResponse, provider, model) {
   return new Promise((resolve, reject) => {
     const providerStream = streamResponse.data;
-    const isSse = provider === "nvidia";
+    const isSse = provider === "nvidia" || provider === "hermes";
     let buffer = "";
     let fullReply = "";
     let fullReasoning = "";
@@ -517,7 +523,7 @@ async function handleChatStream(req, res) {
     providerStream = streamResponse.data;
     cleanupActiveStream = registerSessionStream(session.id, { stream: providerStream });
 
-    const isSse = resolvedProvider === "nvidia";
+    const isSse = resolvedProvider === "nvidia" || resolvedProvider === "hermes";
     let buffer = "";
     let fullReply = "";
     let fullReasoning = "";

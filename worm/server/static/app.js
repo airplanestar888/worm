@@ -519,7 +519,11 @@ async function populateModelSelect(provider, targetSelect, preferredModel = '', 
   try {
     const res = await fetch(`/api/models?provider=${encodeURIComponent(provider)}`);
     const data = await res.json();
-    const fallbackModel = provider === 'nvidia' ? 'stepfun-ai/step-3.5-flash' : 'qwen2.5-coder:3b';
+    const fallbackModel = provider === 'nvidia'
+      ? 'stepfun-ai/step-3.5-flash'
+      : provider === 'hermes'
+        ? 'grok-4.3'
+        : 'qwen2.5-coder:3b';
     const models = Array.isArray(data.models) && data.models.length ? data.models : [data.defaultModel || fallbackModel];
     targetSelect.innerHTML = '';
 
@@ -539,7 +543,11 @@ async function populateModelSelect(provider, targetSelect, preferredModel = '', 
       targetSelect.appendChild(option);
     }
   } catch {
-    const fallbackModel = provider === 'nvidia' ? 'stepfun-ai/step-3.5-flash' : 'qwen2.5-coder:3b';
+    const fallbackModel = provider === 'nvidia'
+      ? 'stepfun-ai/step-3.5-flash'
+      : provider === 'hermes'
+        ? 'grok-4.3'
+        : 'qwen2.5-coder:3b';
     targetSelect.innerHTML = `<option value="${fallbackModel}">${formatModelLabel(fallbackModel)}</option>`;
     if (preferredModel && preferredModel !== fallbackModel) {
       const option = document.createElement('option');
@@ -1088,17 +1096,19 @@ async function activateStartupGateway() {
 }
 
 function formatProviderLabel(provider) {
-  return provider === 'nvidia' ? 'NVIDIA' : 'Ollama';
+  if (provider === 'nvidia') return 'NVIDIA';
+  if (provider === 'hermes') return 'Hermes';
+  return 'Ollama';
 }
 
 function buildRunLabel(provider, model, mode) {
   if (currentSurfaceMode === 'deep_surf') {
-    return ['Deep Search Beta', 'web'].join(' · ');
+    return ['Deep Search Beta', 'web'].join(' - ');
   }
   const parts = [formatSurfaceMode(currentSurfaceMode), formatProviderLabel(provider)];
   if (model) parts.push(model);
   if (mode) parts.push(`Think ${String(mode).replace(/^./, (c) => c.toUpperCase())}`);
-  return parts.join(' · ');
+  return parts.join(' - ');
 }
 
 async function loadHealth() {

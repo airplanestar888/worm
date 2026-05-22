@@ -4,6 +4,7 @@ const { classifyLiveIntent, needsWebLiveLookup, runWebLiveLookup } = require("..
 const {
   defaultModelFor,
   isProviderConfigured,
+  streamHermesChat,
   streamNvidiaChat,
   streamOllamaChat
 } = require("./provider-service");
@@ -237,14 +238,16 @@ async function runRoutingOrchestrator(message, options = {}) {
     try {
       streamResponse = provider === "nvidia"
         ? await streamNvidiaChat({ model, messages, mode: "low" })
-        : await streamOllamaChat({ model, messages, mode: "low" });
+        : provider === "hermes"
+          ? await streamHermesChat({ model, messages, mode: "low" })
+          : await streamOllamaChat({ model, messages, mode: "low" });
     } catch (error) {
       reject(error);
       return;
     }
 
     const stream = streamResponse.data;
-    const isSse = provider === "nvidia";
+    const isSse = provider === "nvidia" || provider === "hermes";
     let buffer = "";
     let fullText = "";
 
