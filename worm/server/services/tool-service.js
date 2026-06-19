@@ -1,6 +1,8 @@
 const { buildCurrentTimeSystemLine, needsCurrentTimeTool, runCurrentTimeTool } = require("../tools/time-tool");
 const { needsDexscreenerLookup, runDexscreenerLookup } = require("../tools/dexscreener-tool");
 const { classifyLiveIntent, needsWebLiveLookup, runWebLiveLookup } = require("../tools/web-live-tool");
+const { needsServerDiagnostic, runServerDiagnostic } = require("../tools/server-tool");
+const { needsNetworkDiagnostic, runNetworkDiagnostic } = require("../tools/network-tool");
 const {
   defaultModelFor,
   isProviderConfigured,
@@ -16,13 +18,16 @@ const ORCHESTRATOR_CATEGORY_HINTS = [
   "staple_price",
   "forex_price",
   "general_price",
+  "stock",
   "technology_news",
   "sports_news",
   "economy_news",
   "general_news",
   "office",
   "person_relation",
-  "count"
+  "count",
+  "server_status",
+  "network"
 ];
 
 function isAffirmativeFollowup(message = "") {
@@ -170,6 +175,10 @@ function friendlyToolLabel(name) {
       return "data live dari web";
     case "dexscreener.lookup":
       return "data live Dexscreener";
+    case "server.status":
+      return "status server";
+    case "network.check":
+      return "diagnostik jaringan";
     default:
       return "data live";
   }
@@ -194,10 +203,10 @@ function normalizeOrchestratorDecision(raw = {}) {
   const categoryHint = String(raw?.categoryHint || "").trim().toLowerCase();
   const confidence = Math.max(0, Math.min(1, Number(raw?.confidence || 0)));
   const query = String(raw?.query || "").trim();
-  const validTools = ["web.live", "time.now", "dexscreener.lookup", "none"];
+  const validTools = ["web.live", "time.now", "dexscreener.lookup", "server.status", "network.check", "none"];
 
   return {
-    mode: mode === "live" ? "live" : mode === "local" ? "local" : "",
+    mode: mode === "live" ? "live" : mode === "local" ? "local" : mode === "diagnostic" ? "diagnostic" : "",
     tool: validTools.includes(tool) ? tool : "",
     categoryHint: ORCHESTRATOR_CATEGORY_HINTS.includes(categoryHint) ? categoryHint : "",
     query,
@@ -212,21 +221,62 @@ async function runRoutingOrchestrator(message, options = {}) {
   if (!isProviderConfigured(provider)) return null;
 
   const currentYear = new Date().getFullYear();
+  const heuristicHint = String(options.heuristicHint || "").trim();
+  const heuristicLine = heuristicHint === "live"
+    ? "Heuristic pre-analysis detected this may need live data. Trust your own judgment but consider this signal."
+    : "Heuristic pre-analysis suggests this may be local knowledge. Override if you see live-data intent.";
+
   const system = [
-    "Route the user request for Worm. Return exactly this JSON structure with these keys: mode, tool, query, categoryHint, confidence, reason.",
-    `For 'mode', use: local or live.`,
-    `For 'tool', use: none, web.live, time.now, or dexscreener.lookup.`,
-    `For 'categoryHint', pick one from: crypto_price, crypto_price_historical, gold_price, staple_price, forex_price, general_price, technology_news, sports_news, economy_news, general_news, office, person_relation, count.`,
-    "Current facts/prices/news/leaders/status => live + web.live.",
-    "Historical crypto price questions (e.g. bitcoin 3 days ago) => live + web.live, never time.now.",
-    "User includes a URL to read/check/summarize => live + web.live.",
-    "Dexscreener token lookups (e.g. specific Solana/ERC20 token, contract address, meme coin) => live + dexscreener.lookup.",
-    "Time-only questions (jam, waktu, tanggal) => live + time.now.",
-    "Stable knowledge/math/language/chat => local + none, query can be empty.",
-    `For query field: write a clean, specific search query. Include '${currentYear}' for price/news. Use Indonesian if user speaks Indonesian.`,
+    "You are a tool-calling router for Worm. Analyze the user message and decide which tool to call.",
+    "Return exactly this JSON structure with these keys: mode, tool, query, categoryHint, confidence, reason.",
+    "",
+    "## mode",
+    "- `live` = needs real-time/external data (prices, news, facts, URLs, current info)",
+    "- `local` = answerable from model knowledge (math, language, opinion, creative, general chat)",
+    "- `diagnostic` = server or network diagnostic (always runs locally on the server)",
+    "",
+    "## tool",
+    "- `none` = no tool needed (local knowledge is sufficient)",
+    "- `web.live` = web search for current info (news, prices, facts, people, events, URLs)",
+    "- `time.now` = ONLY for pure time/date questions (jam berapa, tanggal berapa, what time)",
+    "- `dexscreener.lookup` = specific Solana/ERC20 token or meme coin lookup on Dexscreener",
+    "- `server.status` = server diagnostics (CPU, RAM, disk, uptime, processes, open ports)",
+    "- `network.check` = network diagnostics (ping, DNS lookup, HTTP check, port check, traceroute, SSL, WHOIS)",
+    "",
+    "## categoryHint (required when tool != none)",
+    "crypto_price, crypto_price_historical, gold_price, staple_price, forex_price, general_price, stock, technology_news, sports_news, economy_news, general_news, office, person_relation, count, server_status, network",
+    "",
+    "## Decision rules",
+    "- IMPORTANT: Only use tools when the request is CLEAR and SPECIFIC. If ambiguous, return tool=none and let the main LLM ask for clarification.",
+    "- Ambiguous requests that should return tool=none: 'ping' (no host), 'cek' (no target), 'berapa harga' (no asset), 'bisa ping?' (question, not request).",
+    "- Clear requests that should trigger tools: 'ping google.com', 'harga bitcoin', 'cek status server', 'ip address facebook.com'.",
+    "",
+    "- When in doubt between live and local, prefer live — better to fetch and not need than to miss current data.",
+    "- Any question about current prices, rates, news, status, leaders, schedules, scores => live + web.live.",
+    "- Historical crypto price (e.g. bitcoin 3 days ago) => live + web.live, categoryHint=crypto_price_historical.",
+    "- User includes a URL to read/check/summarize => live + web.live.",
+    "- Specific Solana/ERC20 token, contract address, meme coin => live + dexscreener.lookup.",
+    "- Pure time/date only (jam, waktu, tanggal) => live + time.now.",
+    "- Server status, CPU, RAM, disk, uptime, processes, ports => diagnostic + server.status.",
+    "- Network check WITH specific host/domain/IP => diagnostic + network.check.",
+    "- Network check WITHOUT specific target => tool=none (let LLM ask for clarification).",
+    "- Stable knowledge, math, language, opinion, creative writing, general chat => local + none.",
+    "",
+    "## query field",
+    "- Write a clean, specific search query that will find the answer.",
+    `- Include '${currentYear}' for prices, news, and current events.`,
+    "- Use Indonesian if user speaks Indonesian, English otherwise.",
+    "- For office/leader questions, simplify to role + country/entity (e.g. 'presiden amerika serikat').",
+    "- For server/network questions, include the target host/domain/port if mentioned.",
+    "- Empty string when tool=none.",
+    "",
+    "## Commodity hints",
     "telur/cabai/bawang/beras/sembako/sayur => staple_price.",
     "emas/antam/gold => gold_price.",
-    "btc/bitcoin/crypto => crypto_price."
+    "btc/bitcoin/ethereum/solana/crypto => crypto_price.",
+    "saham/stock/IDX => stock.",
+    "",
+    heuristicLine
   ].join("\n");
   const messages = [
     { role: "system", content: system },
@@ -315,21 +365,23 @@ async function resolveToolContext(message, options = {}) {
     ? getContextualOfficeFollowup(options.session, message)
     : null;
   const effectiveMessage = followup?.originalMessage || contextualOfficeFollowup?.originalMessage || message;
+
+  // --- Regex heuristics (used as hint for LLM, fallback when LLM unavailable) ---
   const heuristicNeedsLiveWeb = needsWebLiveLookup(effectiveMessage);
   const heuristicNeedsTime = needsCurrentTimeTool(effectiveMessage);
   const heuristicNeedsDexscreener = needsDexscreenerLookup(effectiveMessage);
-
-  if (surfaceMode === "deep_surf" && !followup && !contextualOfficeFollowup && !heuristicNeedsLiveWeb && !heuristicNeedsTime && !heuristicNeedsDexscreener) {
-    return {
-      toolResults: [],
-      toolContext: "",
-      directReply: ""
-    };
-  }
+  const heuristicNeedsServer = needsServerDiagnostic(effectiveMessage);
+  const heuristicNeedsNetwork = needsNetworkDiagnostic(effectiveMessage);
+  const heuristicSaysLive = heuristicNeedsLiveWeb || heuristicNeedsTime || heuristicNeedsDexscreener;
+  const heuristicSaysDiagnostic = heuristicNeedsServer || heuristicNeedsNetwork;
 
   // --- PASS 1: LLM routing orchestrator (authoritative) ---
+  // Always run LLM in deep_surf mode — heuristics are a hint, not a gate.
   const orchestratorDecision = surfaceMode === "deep_surf"
-    ? await runRoutingOrchestrator(effectiveMessage, options).catch(() => null)
+    ? await runRoutingOrchestrator(effectiveMessage, {
+        ...options,
+        heuristicHint: heuristicSaysLive ? "live" : heuristicSaysDiagnostic ? "diagnostic" : "local"
+      }).catch(() => null)
     : null;
 
   if (orchestratorDecision) {
@@ -348,6 +400,69 @@ async function resolveToolContext(message, options = {}) {
   const orchestratorNeedsDexscreener = orchestratorDecision
     ? (orchestratorDecision.mode === "live" && orchestratorDecision.tool === "dexscreener.lookup")
     : heuristicNeedsDexscreener;
+  const orchestratorNeedsServer = orchestratorDecision
+    ? (orchestratorDecision.tool === "server.status")
+    : heuristicNeedsServer;
+  const orchestratorNeedsNetwork = orchestratorDecision
+    ? (orchestratorDecision.tool === "network.check")
+    : heuristicNeedsNetwork;
+
+  // Server and network diagnostics always work (no surface mode restriction)
+  if (orchestratorNeedsServer || orchestratorNeedsNetwork) {
+    const tasks = [];
+    const directToolIntents = [];
+
+    if (orchestratorNeedsServer) {
+      directToolIntents.push("server.status");
+      tasks.push(runServerDiagnostic(effectiveMessage));
+    }
+    if (orchestratorNeedsNetwork) {
+      directToolIntents.push("network.check");
+      tasks.push(runNetworkDiagnostic(effectiveMessage));
+    }
+
+    const settled = await Promise.allSettled(tasks);
+    const toolResults = settled.map((entry, index) => {
+      if (entry.status === "fulfilled") return entry.value;
+      const targetName = directToolIntents[index] || `tool.error.${index + 1}`;
+      const err = entry.status === "rejected" ? entry.reason : null;
+      console.warn(`[orchestrator] tool ${targetName} failed: ${err?.message || err}`);
+      return {
+        name: targetName,
+        summary: `${targetName} gagal.`,
+        directReply: `Gagal menjalankan ${targetName}: ${err?.message || "Error tidak diketahui"}`
+      };
+    });
+
+    console.log(`[orchestrator] diagnostic tools executed: [${directToolIntents.join(", ")}]`);
+
+    // Diagnostic tools are always authoritative — bypass LLM
+    const primaryResult = toolResults[0];
+    return {
+      toolResults,
+      toolContext: "",
+      directReply: primaryResult?.directReply || "",
+      orchestratorDecision
+    };
+  }
+
+  // LLM decided "local + none" and heuristics agree → skip tools entirely
+  if (orchestratorDecision && orchestratorDecision.mode === "local" && orchestratorDecision.tool === "none" && !heuristicSaysLive && !heuristicSaysDiagnostic) {
+    return {
+      toolResults: [],
+      toolContext: "",
+      directReply: ""
+    };
+  }
+
+  // No LLM decision and no heuristic signal → skip tools
+  if (!orchestratorDecision && !heuristicSaysLive && !heuristicSaysDiagnostic && !followup && !contextualOfficeFollowup) {
+    return {
+      toolResults: [],
+      toolContext: "",
+      directReply: ""
+    };
+  }
 
   // Always include current time alongside external lookups
   const needsLiveWeb = orchestratorNeedsLiveWeb;
@@ -360,6 +475,15 @@ async function resolveToolContext(message, options = {}) {
       toolResults: [],
       toolContext: "",
       directReply: "Untuk data live seperti ini, pindah ke Deep Search Beta dulu ya."
+    };
+  }
+
+  // Nothing to execute
+  if (!shouldRunTimeTool && !needsDexscreener && !needsLiveWeb) {
+    return {
+      toolResults: [],
+      toolContext: "",
+      directReply: ""
     };
   }
 
@@ -390,6 +514,8 @@ async function resolveToolContext(message, options = {}) {
   const toolResults = settled.map((entry, index) => {
     if (entry.status === "fulfilled") return entry.value;
     const targetName = directToolIntents[index] || `tool.error.${index + 1}`;
+    const err = entry.status === "rejected" ? entry.reason : null;
+    console.warn(`[orchestrator] tool ${targetName} failed: ${err?.message || err}`);
     return {
       name: targetName,
       summary: `${friendlyToolLabel(targetName)} tidak tersedia untuk giliran ini.`,
@@ -398,6 +524,29 @@ async function resolveToolContext(message, options = {}) {
   });
 
   console.log(`[orchestrator] tools executed: [${directToolIntents.join(", ")}] results: ${toolResults.length}`);
+
+  // Check if any tool result has an authoritative directReply that should bypass LLM.
+  // This handles cases where the tool already provides a definitive answer
+  // (e.g. "season hasn't started", "price is X from CoinGecko").
+  // The LLM would otherwise hedge or contradict the tool's authoritative data.
+  const authoritativeResult = toolResults.find((result) => {
+    if (!result?.directReply?.trim()) return false;
+    const score = result?.engine?.score || 0;
+    // High-confidence results (CoinGecko, PIHPS, etc.) always authoritative
+    if (score >= 0.7) return true;
+    // Medium-confidence results with definitive language are authoritative
+    if (score >= 0.4 && /belum tersedia|belum dimulai|belum dirilis|tidak ditemukan/i.test(result.directReply)) return true;
+    return false;
+  });
+
+  if (authoritativeResult) {
+    return {
+      toolResults,
+      toolContext: "",
+      directReply: authoritativeResult.directReply,
+      orchestratorDecision
+    };
+  }
 
   // All results go through LLM — no directReply bypass for tool results
   return {

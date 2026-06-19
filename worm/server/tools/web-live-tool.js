@@ -16,6 +16,7 @@ const {
   PIHPS_PAGE_URL,
   YAHOO_FINANCE_GOLD_URL
 } = require("../config");
+const { getCached, setCached, getCacheKey } = require("../services/web/cache");
 const { runCryptoNewsLookup } = require("./crypto-news-tool");
 const { parseRelativeDateRequest } = require("./time-tool");
 const {
@@ -29,6 +30,27 @@ const {
   fetchPage,
   extractFirstUrl: extractFirstUrlFromRouter
 } = require("../services/web");
+
+// --- Tool-level cache TTLs (ms) ---
+const CACHE_TTL = {
+  coingecko: 30_000,        // crypto prices change fast
+  coingecko_historical: 3600_000,  // historical data never changes
+  gold: 60_000,             // gold prices update ~daily
+  pihps: 120_000,           // commodity prices update daily
+  sports: 300_000,          // fixtures don't change often
+  wikipedia: 600_000,       // knowledge is relatively stable
+  search: 900_000           // RSS search results cached 15min
+};
+
+function cachedToolResult(cacheName, key, ttlMs, fetcher) {
+  const cacheKey = getCacheKey([cacheName, key]);
+  const cached = getCached("tool-results", cacheKey);
+  if (cached) return cached;
+  return fetcher().then((result) => {
+    if (result) setCached("tool-results", cacheKey, result, ttlMs);
+    return result;
+  });
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -740,56 +762,59 @@ async function fetchCoinGeckoCryptoPrice(client, message) {
   const assets = detectCryptoAssets(message);
   if (!assets.length) return null;
 
-  const currencies = detectCryptoCurrencies(message);
-  const headers = { Accept: "application/json" };
-  if (COINGECKO_API_KEY) headers["x-cg-demo-api-key"] = COINGECKO_API_KEY;
+  const cacheKey = assets.map((a) => a.id).sort().join(",");
+  return cachedToolResult("coingecko", cacheKey, CACHE_TTL.coingecko, async () => {
+    const currencies = detectCryptoCurrencies(message);
+    const headers = { Accept: "application/json" };
+    if (COINGECKO_API_KEY) headers["x-cg-demo-api-key"] = COINGECKO_API_KEY;
 
-  const response = await client.get(COINGECKO_SIMPLE_PRICE_URL, {
-    headers,
-    params: {
-      ids: assets.map((asset) => asset.id).join(","),
-      vs_currencies: currencies.join(","),
-      include_24hr_change: "true",
-      include_last_updated_at: "true"
-    }
-  });
+    const response = await client.get(COINGECKO_SIMPLE_PRICE_URL, {
+      headers,
+      params: {
+        ids: assets.map((asset) => asset.id).join(","),
+        vs_currencies: currencies.join(","),
+        include_24hr_change: "true",
+        include_last_updated_at: "true"
+      }
+    });
 
-  const lines = assets
-    .map((asset) => {
-      const item = response.data?.[asset.id] || {};
-      const prices = currencies
-        .map((currency) => ({
-          currency,
-          text: formatCryptoCurrency(item[currency], currency)
-        }))
-        .filter((entry) => entry.text);
+    const lines = assets
+      .map((asset) => {
+        const item = response.data?.[asset.id] || {};
+        const prices = currencies
+          .map((currency) => ({
+            currency,
+            text: formatCryptoCurrency(item[currency], currency)
+          }))
+          .filter((entry) => entry.text);
 
-      if (!prices.length) return null;
-      return {
-        symbol: asset.symbol,
-        name: asset.name,
-        prices,
-        change24h: Number(item[`${currencies[0]}_24h_change`]),
-        updatedAt: formatCryptoUpdatedAt(item.last_updated_at)
-      };
-    })
-    .filter(Boolean);
-
-  if (!lines.length) return null;
-
-  const directReply = formatCryptoPriceReply(lines, message);
-  return {
-    name: "web.live",
-    summary: [
-      "CoinGecko crypto price data:",
-      ...lines.map((line) => {
-        const prices = line.prices.map((item) => `${item.currency.toUpperCase()} ${item.text}`).join(", ");
-        const change = Number.isFinite(line.change24h) ? `, 24h ${line.change24h.toFixed(2)}%` : "";
-        return `${line.symbol} (${line.name}): ${prices}${change}${line.updatedAt ? `, updated ${line.updatedAt}` : ""}.`;
+        if (!prices.length) return null;
+        return {
+          symbol: asset.symbol,
+          name: asset.name,
+          prices,
+          change24h: Number(item[`${currencies[0]}_24h_change`]),
+          updatedAt: formatCryptoUpdatedAt(item.last_updated_at)
+        };
       })
-    ].join("\n"),
-    directReply
-  };
+      .filter(Boolean);
+
+    if (!lines.length) return null;
+
+    const directReply = formatCryptoPriceReply(lines, message);
+    return {
+      name: "web.live",
+      summary: [
+        "CoinGecko crypto price data:",
+        ...lines.map((line) => {
+          const prices = line.prices.map((item) => `${item.currency.toUpperCase()} ${item.text}`).join(", ");
+          const change = Number.isFinite(line.change24h) ? `, 24h ${line.change24h.toFixed(2)}%` : "";
+          return `${line.symbol} (${line.name}): ${prices}${change}${line.updatedAt ? `, updated ${line.updatedAt}` : ""}.`;
+        })
+      ].join("\n"),
+      directReply
+    };
+  });
 }
 
 async function fetchCoinGeckoHistoricalCryptoPrice(client, message) {
@@ -797,60 +822,63 @@ async function fetchCoinGeckoHistoricalCryptoPrice(client, message) {
   const assets = detectCryptoAssets(message);
   if (!context || !assets.length) return null;
 
-  const currencies = detectCryptoCurrencies(message);
-  const headers = { Accept: "application/json" };
-  if (COINGECKO_API_KEY) headers["x-cg-demo-api-key"] = COINGECKO_API_KEY;
-  const baseUrl = String(COINGECKO_SIMPLE_PRICE_URL || "https://api.coingecko.com/api/v3/simple/price").replace(/\/simple\/price.*$/i, "");
+  const cacheKey = assets.map((a) => a.id).sort().join(",") + "@" + context.coingeckoDate;
+  return cachedToolResult("coingecko_historical", cacheKey, CACHE_TTL.coingecko_historical, async () => {
+    const currencies = detectCryptoCurrencies(message);
+    const headers = { Accept: "application/json" };
+    if (COINGECKO_API_KEY) headers["x-cg-demo-api-key"] = COINGECKO_API_KEY;
+    const baseUrl = String(COINGECKO_SIMPLE_PRICE_URL || "https://api.coingecko.com/api/v3/simple/price").replace(/\/simple\/price.*$/i, "");
 
-  const settled = await Promise.allSettled(
-    assets.map(async (asset) => {
-      const response = await client.get(`${baseUrl}/coins/${asset.id}/history`, {
-        headers,
-        params: {
-          date: context.coingeckoDate,
-          localization: "false"
-        }
-      });
-      return {
-        asset,
-        data: response.data || {}
-      };
-    })
-  );
-
-  const lines = settled
-    .filter((entry) => entry.status === "fulfilled")
-    .map((entry) => {
-      const asset = entry.value.asset;
-      const prices = currencies
-        .map((currency) => ({
-          currency,
-          text: formatCryptoCurrency(entry.value.data?.market_data?.current_price?.[currency], currency)
-        }))
-        .filter((item) => item.text);
-
-      if (!prices.length) return null;
-      return {
-        symbol: asset.symbol,
-        name: asset.name,
-        prices
-      };
-    })
-    .filter(Boolean);
-
-  if (!lines.length) return null;
-
-  return {
-    name: "web.live",
-    summary: [
-      `CoinGecko historical crypto price data for ${context.displayLabel}:`,
-      ...lines.map((line) => {
-        const prices = line.prices.map((item) => `${item.currency.toUpperCase()} ${item.text}`).join(", ");
-        return `${line.symbol} (${line.name}): ${prices}.`;
+    const settled = await Promise.allSettled(
+      assets.map(async (asset) => {
+        const response = await client.get(`${baseUrl}/coins/${asset.id}/history`, {
+          headers,
+          params: {
+            date: context.coingeckoDate,
+            localization: "false"
+          }
+        });
+        return {
+          asset,
+          data: response.data || {}
+        };
       })
-    ].join("\n"),
-    directReply: formatHistoricalCryptoPriceReply(lines, message, context)
-  };
+    );
+
+    const lines = settled
+      .filter((entry) => entry.status === "fulfilled")
+      .map((entry) => {
+        const asset = entry.value.asset;
+        const prices = currencies
+          .map((currency) => ({
+            currency,
+            text: formatCryptoCurrency(entry.value.data?.market_data?.current_price?.[currency], currency)
+          }))
+          .filter((item) => item.text);
+
+        if (!prices.length) return null;
+        return {
+          symbol: asset.symbol,
+          name: asset.name,
+          prices
+        };
+      })
+      .filter(Boolean);
+
+    if (!lines.length) return null;
+
+    return {
+      name: "web.live",
+      summary: [
+        `CoinGecko historical crypto price data for ${context.displayLabel}:`,
+        ...lines.map((line) => {
+          const prices = line.prices.map((item) => `${item.currency.toUpperCase()} ${item.text}`).join(", ");
+          return `${line.symbol} (${line.name}): ${prices}.`;
+        })
+      ].join("\n"),
+      directReply: formatHistoricalCryptoPriceReply(lines, message, context)
+    };
+  });
 }
 
 function formatRupiahNumber(value = "") {
@@ -974,40 +1002,42 @@ async function fetchPihpsCommodityPrice(message) {
   const commodity = detectPihpsCommodity(message);
   if (!commodity) return null;
 
-  const pageHtml = await fetchWithCurl(PIHPS_PAGE_URL, { referer: PIHPS_PAGE_URL, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" });
-  const tempMatch = pageHtml.match(/id="temp_id"[^>]*value="([^"]+)"/i);
-  const tempId = String(tempMatch?.[1] || "").trim();
-  if (!tempId) return null;
+  return cachedToolResult("pihps", commodity.name, CACHE_TTL.pihps, async () => {
+    const pageHtml = await fetchWithCurl(PIHPS_PAGE_URL, { referer: PIHPS_PAGE_URL, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" });
+    const tempMatch = pageHtml.match(/id="temp_id"[^>]*value="([^"]+)"/i);
+    const tempId = String(tempMatch?.[1] || "").trim();
+    if (!tempId) return null;
 
-  const chartUrl = `${PIHPS_CHART_URL}?tempId=${encodeURIComponent(tempId)}&comName=${encodeURIComponent(commodity.name)}`;
-  const raw = await fetchWithCurl(chartUrl, { referer: PIHPS_PAGE_URL, accept: "application/json,text/plain,*/*" });
-  const payload = JSON.parse(raw || "{}");
-  const points = Array.isArray(payload?.data) ? payload.data : [];
-  const latest = [...points].reverse().find((item) => Number.isFinite(Number(item?.nominal)));
-  if (!latest) return null;
+    const chartUrl = `${PIHPS_CHART_URL}?tempId=${encodeURIComponent(tempId)}&comName=${encodeURIComponent(commodity.name)}`;
+    const raw = await fetchWithCurl(chartUrl, { referer: PIHPS_PAGE_URL, accept: "application/json,text/plain,*/*" });
+    const payload = JSON.parse(raw || "{}");
+    const points = Array.isArray(payload?.data) ? payload.data : [];
+    const latest = [...points].reverse().find((item) => Number.isFinite(Number(item?.nominal)));
+    if (!latest) return null;
 
-  const nominal = Number(latest.nominal);
-  const unit = String(latest.denomination || "kg").trim();
-  const formattedNominal = `Rp ${new Intl.NumberFormat("id-ID").format(nominal)}`;
-  const formattedDate = formatPihpsDate(latest.date);
-  const nationalLabel = /\b(di|daerah|provinsi|kota|kabupaten|bandung|jakarta|jabar|jatim|jateng|surabaya|bogor|depok|bekasi)\b/i.test(normalizeSearchText(message))
-    ? "Saya baru nemu angka rata-rata nasional dari PIHPS, belum angka daerah spesifik."
-    : "";
+    const nominal = Number(latest.nominal);
+    const unit = String(latest.denomination || "kg").trim();
+    const formattedNominal = `Rp ${new Intl.NumberFormat("id-ID").format(nominal)}`;
+    const formattedDate = formatPihpsDate(latest.date);
+    const nationalLabel = /\b(di|daerah|provinsi|kota|kabupaten|bandung|jakarta|jabar|jatim|jateng|surabaya|bogor|depok|bekasi)\b/i.test(normalizeSearchText(message))
+      ? "Saya baru nemu angka rata-rata nasional dari PIHPS, belum angka daerah spesifik."
+      : "";
 
-  return {
-    name: "web.live",
-    summary: [
-      "Portal harga pangan resmi:",
-      `PIHPS Nasional / BI ${commodity.name}: ${formattedNominal} per ${unit}${formattedDate ? `, data ${formattedDate}` : ""}.`,
-      `Panel Harga Pangan tersedia sebagai fallback portal: ${PANEL_HARGA_PANGAN_URL}`,
-      nationalLabel
-    ].filter(Boolean).join("\n"),
-    directReply: [
-      `Harga ${commodity.name.toLowerCase()} sekarang sekitar ${formattedNominal}/${unit}.`,
-      nationalLabel,
-      `Sumber: PIHPS Nasional / BI${formattedDate ? `, ${formattedDate}` : ""}.`
-    ].filter(Boolean).join(" ")
-  };
+    return {
+      name: "web.live",
+      summary: [
+        "Portal harga pangan resmi:",
+        `PIHPS Nasional / BI ${commodity.name}: ${formattedNominal} per ${unit}${formattedDate ? `, data ${formattedDate}` : ""}.`,
+        `Panel Harga Pangan tersedia sebagai fallback portal: ${PANEL_HARGA_PANGAN_URL}`,
+        nationalLabel
+      ].filter(Boolean).join("\n"),
+      directReply: [
+        `Harga ${commodity.name.toLowerCase()} sekarang sekitar ${formattedNominal}/${unit}.`,
+        nationalLabel,
+        `Sumber: PIHPS Nasional / BI${formattedDate ? `, ${formattedDate}` : ""}.`
+      ].filter(Boolean).join(" ")
+    };
+  });
 }
 
 async function fetchPanelHargaPanganPortal() {
@@ -1023,62 +1053,154 @@ async function fetchPanelHargaPanganPortal() {
   };
 }
 
+/**
+ * Parse all gold price rows from Logam Mulia HTML table.
+ * Extracts weight, base price, and tax-inclusive price for each row.
+ * Strips HTML comments before parsing to avoid commented-out cells.
+ */
+function parseLogamMuliaTable(html = "") {
+  const rows = [];
+  // Strip HTML comments first — they contain commented-out <td> elements
+  const cleanHtml = html.replace(/<!--[\s\S]*?-->/g, "");
+
+  // Find the Emas Batangan table
+  const tableMatch = cleanHtml.match(/<table[^>]*class="table table-bordered"[^>]*>[\s\S]*?<\/table>/i);
+  if (!tableMatch) return rows;
+
+  const table = tableMatch[0];
+  // Extract all <tr> blocks
+  const trBlocks = table.match(/<tr>[\s\S]*?<\/tr>/gi) || [];
+
+  for (const tr of trBlocks) {
+    const cells = Array.from(tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)).map((m) =>
+      stripHtml(m[1] || "").replace(/,/g, "").trim()
+    );
+    if (cells.length < 2) continue;
+
+    const weight = cells[0]; // e.g. "1 gr"
+    if (!/\d+(\.\d+)?\s*gr/i.test(weight)) continue;
+
+    const prices = cells.slice(1).map((c) => parseInt(c, 10)).filter((n) => Number.isFinite(n) && n > 0);
+    if (!prices.length) continue;
+
+    const weightNum = parseFloat(weight);
+    // After stripping comments: [weight, basePrice, finalPrice]
+    // basePrice = Harga Dasar, finalPrice = Harga (+Pajak PPh 0.25%)
+    rows.push({
+      weight: weight.trim(),
+      weightGrams: weightNum,
+      basePrice: prices[0] || 0,
+      finalPrice: prices.length >= 2 ? prices[prices.length - 1] : prices[0] || 0
+    });
+  }
+
+  return rows;
+}
+
 async function fetchLogamMuliaGoldPrice(client, message) {
   if (!isGoldQuery(message)) return null;
 
-  const response = await client.get(LOGAM_MULIA_PRICE_URL);
-  const html = String(response.data || "");
-  const dateMatch = html.match(/Harga Emas Hari Ini,\s*([^<]+)/i);
-  const updateMatch = html.match(/Harga di-update setiap hari[^<]+/i);
-  const oneGramMatch = html.match(/<td>1 gr<\/td>[\s\S]{0,250}?<td[^>]*style="text-align:right;">([^<]+)<\/td>/i);
-  const halfGramMatch = html.match(/<td>0\.5 gr<\/td>[\s\S]{0,250}?<td[^>]*style="text-align:right;">([^<]+)<\/td>/i);
+  return cachedToolResult("gold", "logam_mulia", CACHE_TTL.gold, async () => {
+    const response = await client.get(LOGAM_MULIA_PRICE_URL, {
+      timeout: 15000,
+      proxy: false,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        Accept: "text/html,application/xhtml+xml"
+      }
+    });
+    const html = String(response.data || "");
 
-  if (!oneGramMatch?.[1]) return null;
+    // Parse all price rows from table
+    const rows = parseLogamMuliaTable(html);
+    if (!rows.length) return null;
 
-  const oneGram = formatRupiahNumber(oneGramMatch[1]);
-  const halfGram = formatRupiahNumber(halfGramMatch?.[1] || "");
-  const dateLabel = String(dateMatch?.[1] || "").trim();
-  const updateLabel = String(updateMatch?.[0] || "").replace(/\s+/g, " ").trim();
+    // Find specific weights
+    const oneGram = rows.find((r) => r.weightGrams === 1);
+    const halfGram = rows.find((r) => r.weightGrams === 0.5);
+    const fiveGram = rows.find((r) => r.weightGrams === 5);
+    const tenGram = rows.find((r) => r.weightGrams === 10);
 
-  const directReply = [
-    `Harga emas Antam 1 gram sekarang sekitar ${oneGram}.`,
-    halfGram ? `Untuk 0,5 gram sekitar ${halfGram}.` : "",
-    `Sumber: Logam Mulia${dateLabel ? `, ${dateLabel}` : ""}${updateLabel ? ` · ${updateLabel}` : ""}.`
-  ].filter(Boolean).join(" ");
+    if (!oneGram) return null;
 
-  return {
-    name: "web.live",
-    summary: [
-      "Portal harga emas resmi:",
-      `Logam Mulia Antam 1 gr: ${oneGram}${halfGram ? `, 0.5 gr: ${halfGram}` : ""}${dateLabel ? `, tanggal ${dateLabel}` : ""}${updateLabel ? `, ${updateLabel}` : ""}.`
-    ].join("\n"),
-    directReply
-  };
+    // Extract date from page title
+    const dateMatch = html.match(/Harga Emas Hari Ini,\s*([^<|]+)/i);
+    const dateLabel = String(dateMatch?.[1] || "").trim();
+
+    // Extract update info
+    const updateMatch = html.match(/Harga di-update[^<]*/i);
+    const updateLabel = String(updateMatch?.[0] || "").replace(/\s+/g, " ").trim();
+
+    // Format prices
+    const oneGramPrice = formatRupiahNumber(String(oneGram.finalPrice));
+    const halfGramPrice = halfGram ? formatRupiahNumber(String(halfGram.finalPrice)) : "";
+    const fiveGramPrice = fiveGram ? formatRupiahNumber(String(fiveGram.finalPrice)) : "";
+    const tenGramPrice = tenGram ? formatRupiahNumber(String(tenGram.finalPrice)) : "";
+
+    // Build per-gram unit price for comparison
+    const perGram = oneGram.finalPrice > 0
+      ? formatRupiahNumber(String(Math.round(oneGram.finalPrice / oneGram.weightGrams)))
+      : "";
+
+    const summaryLines = [
+      "Harga emas batangan Logam Mulia (ANTAM) hari ini:",
+      `1 gram: ${oneGramPrice}${perGram ? ` (${perGram}/gr)` : ""}`,
+      halfGram ? `0.5 gram: ${halfGramPrice}` : "",
+      fiveGram ? `5 gram: ${fiveGramPrice}` : "",
+      tenGram ? `10 gram: ${tenGramPrice}` : "",
+      dateLabel ? `Tanggal: ${dateLabel}` : "",
+      updateLabel ? updateLabel : "",
+      "Harga sudah termasuk PPh 0.25%. Sumber: logammulia.com"
+    ].filter(Boolean).join("\n");
+
+    const directReply = [
+      `Harga emas Antam 1 gram sekarang sekitar ${oneGramPrice}.`,
+      halfGram ? `Untuk 0,5 gram sekitar ${halfGramPrice}.` : "",
+      `Sumber: Logam Mulia${dateLabel ? `, ${dateLabel}` : ""}${updateLabel ? ` · ${updateLabel}` : ""}.`
+    ].filter(Boolean).join(" ");
+
+    return {
+      name: "web.live",
+      summary: summaryLines,
+      directReply,
+      engine: {
+        score: 0.92,
+        evidence: [{
+          sourceLabel: "Logam Mulia",
+          sourceType: "official",
+          confidence: 0.92,
+          evidence: `1 gr: ${oneGramPrice}, source: logammulia.com`
+        }]
+      }
+    };
+  });
 }
 
 async function fetchYahooFinanceGoldPrice(client, message) {
   if (!isGoldQuery(message)) return null;
 
-  const response = await client.get(YAHOO_FINANCE_GOLD_URL, {
-    headers: { Accept: "application/json" }
+  return cachedToolResult("gold", "yahoo_finance", CACHE_TTL.gold, async () => {
+    const response = await client.get(YAHOO_FINANCE_GOLD_URL, {
+      headers: { Accept: "application/json" }
+    });
+    const meta = response.data?.chart?.result?.[0]?.meta || {};
+    const price = formatUsdNumber(meta.regularMarketPrice);
+    if (!price) return null;
+
+    const updatedAt = Number(meta.regularMarketTime)
+      ? new Intl.DateTimeFormat(APP_LOCALE, { dateStyle: "medium", timeStyle: "short" }).format(new Date(Number(meta.regularMarketTime) * 1000))
+      : "";
+    const symbol = meta.symbol || "GC=F";
+
+    return {
+      name: "web.live",
+      summary: [
+        "Portal harga market:",
+        `Yahoo Finance ${symbol}: ${price}${updatedAt ? `, updated ${updatedAt}` : ""}.`
+      ].join("\n"),
+      directReply: `Harga gold futures sekarang sekitar ${price}.${updatedAt ? ` Sumber: Yahoo Finance, ${updatedAt}.` : " Sumber: Yahoo Finance."}`
+    };
   });
-  const meta = response.data?.chart?.result?.[0]?.meta || {};
-  const price = formatUsdNumber(meta.regularMarketPrice);
-  if (!price) return null;
-
-  const updatedAt = Number(meta.regularMarketTime)
-    ? new Intl.DateTimeFormat(APP_LOCALE, { dateStyle: "medium", timeStyle: "short" }).format(new Date(Number(meta.regularMarketTime) * 1000))
-    : "";
-  const symbol = meta.symbol || "GC=F";
-
-  return {
-    name: "web.live",
-    summary: [
-      "Portal harga market:",
-      `Yahoo Finance ${symbol}: ${price}${updatedAt ? `, updated ${updatedAt}` : ""}.`
-    ].join("\n"),
-    directReply: `Harga gold futures sekarang sekitar ${price}.${updatedAt ? ` Sumber: Yahoo Finance, ${updatedAt}.` : " Sumber: Yahoo Finance."}`
-  };
 }
 
 function cleanLiveQuery(message) {
@@ -1091,36 +1213,60 @@ function buildSearchQuery(message) {
   const commodity = extractCommodityLabel(message);
   const location = extractLocationLabel(message);
   const historicalContext = buildHistoricalDateContext(message);
+  const queryKind = detectQueryKind(message);
 
-  if (isHistoricalCryptoPriceQuery(message) && historicalContext) {
+  // Historical crypto price
+  if (queryKind === "price" && isHistoricalCryptoPriceQuery(message) && historicalContext) {
     const assetNames = detectCryptoAssets(message).map((asset) => asset.name).join(" ") || queryText;
     return `${assetNames} price ${historicalContext.displayLabel}`.trim();
   }
 
-  if (/\b(vice president|wakil presiden|vp|president|presiden|prime minister|perdana menteri|ceo|governor|gubernur|minister|menteri|secretary|sekretaris|defense|pertahanan|perang|queen|ratu|king|raja|monarch)\b/.test(lower)) {
+  // Office/leader questions — simplify to role + subject
+  if (queryKind === "office") {
+    return simplifyOfficeSearchQuery(message);
+  }
+
+  // Person relation questions
+  if (queryKind === "person_relation") {
     return queryText.replace(/^\s*(siapa|who is)\s+/i, "").trim();
   }
 
-  if (hasAnyPhrase(lower, LIVE_PERSON_RELATION_KEYWORDS)) {
-    return queryText.replace(/^\s*(siapa|who is)\s+/i, "").trim();
-  }
-
-  if (/\b(berapa jumlah|jumlah|how many|count|total)\b/.test(lower) && /\b(provinsi|province|state|kabupaten|regency|kota|city|pulau|island)\b/.test(lower)) {
+  // Count questions
+  if (queryKind === "count") {
     return queryText;
   }
 
-  if (/\b(bitcoin|ethereum|solana|bnb|xrp|doge|dogecoin|cardano|ada|crypto|coin)\b/.test(lower)) {
+  // Sports questions
+  if (queryKind === "sports") {
     return queryText;
   }
 
-  if (/\b(gold|emas|xau)\b/.test(lower)) {
+  // News questions
+  if (["technology_news", "economy_news", "general_news"].includes(queryKind)) {
     return queryText;
   }
 
+  // Stock questions
+  if (queryKind === "stock") {
+    return queryText;
+  }
+
+  // Crypto questions
+  if (queryKind === "price" && isCryptoQuery(message)) {
+    return queryText;
+  }
+
+  // Gold questions
+  if (queryKind === "price" && isGoldQuery(message)) {
+    return queryText;
+  }
+
+  // Forex questions
   if (/\b(usd|idr|rupiah|dollar|dolar|exchange)\b/.test(lower)) {
     return queryText;
   }
 
+  // ChatGPT/OpenAI pricing
   if (/\b(chatgpt|openai)\b/.test(lower)) {
     if (/\bpro\b/.test(lower)) return "OpenAI ChatGPT Pro pricing";
     if (/\bplus\b/.test(lower)) return "OpenAI ChatGPT Plus pricing";
@@ -1131,6 +1277,7 @@ function buildSearchQuery(message) {
     return "OpenAI ChatGPT pricing";
   }
 
+  // Commodity questions
   if (commodity) {
     return ["harga", commodity, location].filter(Boolean).join(" ");
   }
@@ -1140,40 +1287,46 @@ function buildSearchQuery(message) {
 
 function buildFallbackSearchQuery(message, queryKind) {
   const normalized = normalizeSearchText(message);
-  const lower = normalized.toLowerCase();
   const historicalContext = buildHistoricalDateContext(message);
 
+  // Historical crypto
   if (queryKind === "price" && isHistoricalCryptoPriceQuery(message) && historicalContext) {
     return `${normalized} historical price ${historicalContext.displayLabel}`;
   }
 
+  // Office
   if (queryKind === "office") {
-    if (/\b(wakil presiden|vice president|vp)\b/.test(lower)) {
-      return `${normalized} current holder`;
-    }
-    if (/\b(ratu|queen|raja|king|monarch)\b/.test(lower)) {
-      return `${normalized} current holder`;
-    }
-    if (/\b(menteri|minister|secretary|sekretaris|defense|pertahanan|perang)\b/.test(lower)) {
-      return `${normalized} current official`;
-    }
-    return `${normalized} current`;
+    return `${simplifyOfficeSearchQuery(message)} current`;
   }
 
+  // Person relation
   if (queryKind === "person_relation") {
     return `${normalized} reliable source`;
   }
 
+  // Count
   if (queryKind === "count") {
-    return `${normalized} current total`;
+    return `${normalized} official`;
   }
 
+  // Sports
   if (queryKind === "sports") {
     return `${normalized} skor jadwal hasil pertandingan`;
   }
 
-  if (queryKind === "technology_news" || queryKind === "economy_news" || queryKind === "general_news") {
+  // News
+  if (["technology_news", "economy_news", "general_news"].includes(queryKind)) {
     return `${normalized} latest`;
+  }
+
+  // Stock
+  if (queryKind === "stock") {
+    return `${normalized} saham harga`;
+  }
+
+  // Price (general)
+  if (queryKind === "price") {
+    return `${normalized} harga resmi`;
   }
 
   return `${normalized} live current`;
@@ -1371,7 +1524,15 @@ function classifyLiveIntent(message) {
 
 function classifyLiveCategory(message = "", queryKind = classifyLiveIntent(message), hint = "") {
   const text = normalizeSearchText(message).toLowerCase();
-  if (hint) return hint;
+  if (hint) {
+    // Trust orchestrator hint — map to known categories
+    const validHints = [
+      "crypto_price", "crypto_price_historical", "gold_price", "staple_price",
+      "forex_price", "general_price", "stock", "technology_news", "sports_news",
+      "economy_news", "general_news", "office", "person_relation", "count"
+    ];
+    if (validHints.includes(hint)) return hint;
+  }
 
   if (queryKind === "office") return "office";
   if (queryKind === "person_relation") return "person_relation";
@@ -1407,6 +1568,8 @@ function sourcePlanForCategory(category = "general_news") {
       return ["logam_mulia", "yahoo_gold", "x_search", "search", "registry_rss"];
     case "staple_price":
       return ["pihps", "panel_harga_pangan", "x_search", "search", "registry_rss"];
+    case "stock":
+      return ["x_search", "search", "registry_rss"];
     case "technology_news":
     case "sports_news":
     case "economy_news":
@@ -2735,10 +2898,27 @@ function buildEvidenceLine(candidate) {
   return evidence ? `Evidence: ${evidence}` : "";
 }
 
+// Per-category confidence thresholds — higher for factual claims, lower for volatile data
+const CATEGORY_CONFIDENCE_THRESHOLDS = {
+  office: 0.85,             // factual: who holds office
+  person_relation: 0.82,    // factual: family/relations
+  count: 0.82,              // factual: how many provinces
+  stock_identity: 0.80,     // factual: what company is this ticker
+  stock_price: 0.65,        // volatile: stock prices change fast
+  price: 0.70,              // volatile: prices fluctuate
+  vehicle_price: 0.68,      // semi-volatile: used car prices
+  default: 0.75             // general fallback
+};
+
+function confidenceThresholdForKind(queryKind) {
+  return CATEGORY_CONFIDENCE_THRESHOLDS[queryKind] || CATEGORY_CONFIDENCE_THRESHOLDS.default;
+}
+
 function decideLiveOutcome(message, queryKind, query, searchPayload, candidates = [], options = {}) {
   const ranked = candidates.filter(Boolean).sort((a, b) => b.score - a.score).slice(0, 5);
   const best = ranked[0];
   const currentDataConfidence = best?.confidence || 0;
+  const threshold = confidenceThresholdForKind(best?.kind || queryKind);
   const evidenceSummary = ranked
     .slice(0, 3)
     .map((candidate, index) => `${index + 1}. ${candidate.sourceLabel} (${candidate.sourceType}) score ${candidate.confidence}: ${summarizeEvidenceText(candidate.evidence, candidate.directReply)}`)
@@ -2749,8 +2929,7 @@ function decideLiveOutcome(message, queryKind, query, searchPayload, candidates 
   if (options.synthesisOnly) {
     return {
       name: "web.live",
-      summary: [snapshot, evidenceSummary ? `Top evidence:
-${evidenceSummary}` : "", best ? `Current-data confidence: ${currentDataConfidence}.` : ""]
+      summary: [snapshot, evidenceSummary ? `Top evidence:\n${evidenceSummary}` : "", best ? `Current-data confidence: ${currentDataConfidence}.` : ""]
         .filter(Boolean)
         .join("\n"),
       directReply: "",
@@ -2758,7 +2937,7 @@ ${evidenceSummary}` : "", best ? `Current-data confidence: ${currentDataConfiden
     };
   }
 
-  if (best && best.score >= 0.8) {
+  if (best && best.score >= threshold) {
     return {
       name: "web.live",
       summary: best.summary,
@@ -2769,8 +2948,7 @@ ${evidenceSummary}` : "", best ? `Current-data confidence: ${currentDataConfiden
 
   return {
     name: "web.live",
-    summary: [snapshot, evidenceSummary ? `Top evidence:
-${evidenceSummary}` : "", best ? `Current-data confidence: ${currentDataConfidence}.` : ""]
+    summary: [snapshot, evidenceSummary ? `Top evidence:\n${evidenceSummary}` : "", best ? `Current-data confidence: ${currentDataConfidence} (threshold: ${threshold}).` : ""]
       .filter(Boolean)
       .join("\n"),
     directReply: options.synthesisOnly ? "" : buildInconclusiveReply(message, queryKind),
@@ -2986,6 +3164,8 @@ function isUsefulOutcome(outcome) {
   if (!outcome) return false;
   if ((outcome.engine?.score || 0) > 0) return true;
   if (String(outcome.directReply || '').trim() && !/belum cukup jelas/i.test(String(outcome.directReply || ''))) return true;
+  // Search results with actual content are useful even without structured extraction
+  if (outcome.summary && /Web search results for/.test(outcome.summary) && !/snippets were insufficient/i.test(outcome.summary)) return true;
   return false;
 }
 
@@ -3270,56 +3450,105 @@ async function fetchSportsFixtureData(client, message) {
   const profile = findSportsTeamProfile(message);
   if (!profile) return null;
 
-  const url = `https://site.api.espn.com/apis/site/v2/sports/soccer/${profile.leagueSlug}/teams/${profile.espnId}/schedule`;
-  const response = await client.get(url, {
-    timeout: 10000,
-    headers: {
-      Accept: "application/json"
+  return cachedToolResult("sports", profile.espnId, CACHE_TTL.sports, async () => {
+    const url = `https://site.api.espn.com/apis/site/v2/sports/soccer/${profile.leagueSlug}/teams/${profile.espnId}/schedule`;
+    const response = await client.get(url, {
+      timeout: 10000,
+      headers: {
+        Accept: "application/json"
+      }
+    });
+    const events = Array.isArray(response?.data?.events) ? response.data.events : [];
+    const now = new Date();
+    let fixtures = events
+      .map(normalizeEspnFixture)
+      .filter(Boolean)
+      .filter((fixture) => fixture.date.getTime() >= now.getTime() - 60 * 60 * 1000)
+      .sort((a, b) => a.date - b.date);
+    let sourceLabel = profile.sourceLabel;
+
+    if (!fixtures.length) {
+      const ligaFixtures = await fetchLigaIdScheduleFixtures(profile).catch(() => []);
+      fixtures = ligaFixtures
+        .filter((fixture) => fixture.date.getTime() >= now.getTime() - 60 * 60 * 1000)
+        .sort((a, b) => a.date - b.date);
+      if (fixtures.length) sourceLabel = "Liga.id";
     }
+
+    if (!fixtures.length) {
+      fixtures = (await fetchEspnFixturePageFixtures(client, profile).catch(() => []))
+        .filter((fixture) => fixture.date.getTime() >= now.getTime() - 60 * 60 * 1000)
+        .sort((a, b) => a.date - b.date);
+      if (fixtures.length) sourceLabel = profile.sourceLabel;
+    }
+
+    // If no upcoming fixtures found, provide context instead of null
+    // This helps the LLM reason about WHY there are no fixtures
+    if (!fixtures.length) {
+      const currentMonth = now.getMonth() + 1; // 1-12
+      const currentYear = now.getFullYear();
+      const isLiga1 = profile.leagueSlug === "idn.1";
+      const seasonContext = isLiga1
+        ? `Liga 1 Indonesia biasanya bergulir sekitar Juli–Desember (atau Februari–Desember untuk musim panjang). Bulan sekarang: ${currentMonth}/${currentYear}. Jika di luar periode musim, kemungkinan musim belum dimulai atau sudah selesai.`
+        : `Tidak ditemukan jadwal pertandingan mendatang untuk ${profile.name}.`;
+
+      // Detect if last season's matches exist in search results (musim lalu sudah selesai)
+      const lastSeasonNote = isLiga1
+        ? "Artikel yang menyebut hasil pertandingan Mei–Juni 2026 kemungkinan dari musim 2025/2026 yang sudah berakhir atau sedang berakhir. Musim 2026/2027 belum dimulai atau jadwalnya belum dirilis."
+        : "";
+
+      const summary = [
+        `SPORTS FIXTURE STATUS for ${profile.name}:`,
+        "Checked: ESPN API → Liga.id → ESPN fixture page. RESULT: No upcoming fixtures found.",
+        seasonContext,
+        lastSeasonNote,
+        "IMPORTANT CONTEXT FOR THE LLM:",
+        "- Articles mentioning matches from Mei–Juni 2026 are from the PREVIOUS season (2025/2026).",
+        "- The 2025/2026 season has ended or is ending. The new season (2026/2027) has NOT started yet.",
+        "- Do NOT present past-season results as upcoming fixtures.",
+        "- Correct answer: 'Musim Liga 1 2025/2026 sudah selesai. Musim 2026/2027 belum dimulai, jadwal belum dirilis.'"
+      ].filter(Boolean).join("\n");
+
+      return {
+        name: "web.live",
+        summary,
+        directReply: [
+          `Jadwal pertandingan ${profile.name} berikutnya belum tersedia.`,
+          `Musim Liga 1 2025/2026 sudah selesai atau sedang berakhir.`,
+          `Musim 2026/2027 belum dimulai — jadwal belum dirilis oleh PSSI/Liga Indonesia.`,
+          `Artikel yang muncul di pencarian (hasil pertandingan Mei–Juni 2026) adalah dari musim lalu, bukan jadwal mendatang.`
+        ].join(" "),
+        contextText: summary,
+        engine: {
+          score: 0.5,
+          evidence: [{
+            sourceLabel: "ESPN + Liga.id",
+            sourceType: "publisher",
+            confidence: 0.5,
+            evidence: `No upcoming fixtures for ${profile.name}. 2025/2026 season ended, 2026/2027 not started.`
+          }]
+        }
+      };
+    }
+
+    const directReply = buildSportsFixtureReply(profile, fixtures, sourceLabel, message);
+    const summary = buildSportsFixtureSummary(profile, fixtures, message, sourceLabel);
+    return {
+      name: "web.live",
+      summary,
+      directReply,
+      contextText: summary,
+      engine: {
+        score: 0.92,
+        evidence: [{
+          sourceLabel,
+          sourceType: "publisher",
+          confidence: 0.92,
+          evidence: summary
+        }]
+      }
+    };
   });
-  const events = Array.isArray(response?.data?.events) ? response.data.events : [];
-  const now = new Date();
-  let fixtures = events
-    .map(normalizeEspnFixture)
-    .filter(Boolean)
-    .filter((fixture) => fixture.date.getTime() >= now.getTime() - 60 * 60 * 1000)
-    .sort((a, b) => a.date - b.date);
-  let sourceLabel = profile.sourceLabel;
-
-  if (!fixtures.length) {
-    const ligaFixtures = await fetchLigaIdScheduleFixtures(profile).catch(() => []);
-    fixtures = ligaFixtures
-      .filter((fixture) => fixture.date.getTime() >= now.getTime() - 60 * 60 * 1000)
-      .sort((a, b) => a.date - b.date);
-    if (fixtures.length) sourceLabel = "Liga.id";
-  }
-
-  if (!fixtures.length) {
-    fixtures = (await fetchEspnFixturePageFixtures(client, profile).catch(() => []))
-      .filter((fixture) => fixture.date.getTime() >= now.getTime() - 60 * 60 * 1000)
-      .sort((a, b) => a.date - b.date);
-    if (fixtures.length) sourceLabel = profile.sourceLabel;
-  }
-
-  if (!fixtures.length) return null;
-
-  const directReply = buildSportsFixtureReply(profile, fixtures, sourceLabel, message);
-  const summary = buildSportsFixtureSummary(profile, fixtures, message, sourceLabel);
-  return {
-    name: "web.live",
-    summary,
-    directReply,
-    contextText: summary,
-    engine: {
-      score: 0.92,
-      evidence: [{
-        sourceLabel,
-        sourceType: "publisher",
-        confidence: 0.92,
-        evidence: summary
-      }]
-    }
-  };
 }
 
 function finalizeToolRouteResult(result, options = {}) {
@@ -3350,25 +3579,30 @@ async function resolveCategorySources({ client, message, route, options = {} }) 
   for (const source of route.sources || []) {
     let candidate = null;
 
-    if (source === "crypto_multi_news") {
-      candidate = await withRetry(() => runCryptoNewsLookup(message), { attempts: 2 }).catch(() => null);
-    } else if (source === "coingecko") {
-      candidate = await withRetry(() => fetchCoinGeckoCryptoPrice(client, message), { attempts: 3 }).catch(() => null);
-    } else if (source === "coingecko_historical") {
-      candidate = await withRetry(() => fetchCoinGeckoHistoricalCryptoPrice(client, message), { attempts: 3 }).catch(() => null);
-    } else if (source === "logam_mulia") {
-      candidate = await withRetry(() => fetchLogamMuliaGoldPrice(client, message), { attempts: 2 }).catch(() => null);
-    } else if (source === "yahoo_gold") {
-      candidate = await withRetry(() => fetchYahooFinanceGoldPrice(client, message), { attempts: 2 }).catch(() => null);
-    } else if (source === "pihps") {
-      candidate = await withRetry(() => fetchPihpsCommodityPrice(message), { attempts: 2 }).catch(() => null);
-    } else if (source === "panel_harga_pangan") {
-      const rawCandidate = await withRetry(() => fetchPanelHargaPanganPortal(), { attempts: 1 }).catch(() => null);
-      candidate = rawCandidate
-        ? { ...rawCandidate, _routeMeta: { source, category: route.category, isFallback: true } }
-        : null;
-    } else if (source === "sports_fixture") {
-      candidate = await withRetry(() => fetchSportsFixtureData(client, message), { attempts: 2 }).catch(() => null);
+    try {
+      if (source === "crypto_multi_news") {
+        candidate = await withRetry(() => runCryptoNewsLookup(message), { attempts: 2 });
+      } else if (source === "coingecko") {
+        candidate = await withRetry(() => fetchCoinGeckoCryptoPrice(client, message), { attempts: 3 });
+      } else if (source === "coingecko_historical") {
+        candidate = await withRetry(() => fetchCoinGeckoHistoricalCryptoPrice(client, message), { attempts: 3 });
+      } else if (source === "logam_mulia") {
+        candidate = await withRetry(() => fetchLogamMuliaGoldPrice(client, message), { attempts: 2 });
+      } else if (source === "yahoo_gold") {
+        candidate = await withRetry(() => fetchYahooFinanceGoldPrice(client, message), { attempts: 2 });
+      } else if (source === "pihps") {
+        candidate = await withRetry(() => fetchPihpsCommodityPrice(message), { attempts: 2 });
+      } else if (source === "panel_harga_pangan") {
+        const rawCandidate = await withRetry(() => fetchPanelHargaPanganPortal(), { attempts: 1 });
+        candidate = rawCandidate
+          ? { ...rawCandidate, _routeMeta: { source, category: route.category, isFallback: true } }
+          : null;
+      } else if (source === "sports_fixture") {
+        candidate = await withRetry(() => fetchSportsFixtureData(client, message), { attempts: 2 });
+      }
+    } catch (err) {
+      console.warn(`[web-live] source=${source} category=${route.category} failed: ${err?.message || err}`);
+      candidate = null;
     }
 
     if (!candidate) continue;
@@ -3463,6 +3697,8 @@ async function runSingleWebLiveLookup(message, options = {}) {
       ? buildSecondHopSearchQueries(message, queryKind)
       : [buildSearchQuery(message), buildFallbackSearchQuery(message, queryKind)];
 
+  console.log(`[web-live] queries (${queries.length}): [${queries.slice(0, 3).join(" | ")}${queries.length > 3 ? " | ..." : ""}] override=${overrideQuery || "none"}`);
+
   const { primaryProviders, fallbackProviders, xPrimaryProviders, xFallbackProviders } = createRouteSearchProviders(client, message, route, queryKind);
 
   let selectedQuery = "";
@@ -3474,7 +3710,10 @@ async function runSingleWebLiveLookup(message, options = {}) {
           fallbackProviders: xFallbackProviders,
           cacheTtlMs: 15 * 60 * 1000,
           mergeAcrossProviders: true
-        }).catch(() => null)
+        }).catch((err) => {
+          console.warn(`[web-live] xSearch failed for "${query}": ${err?.message || err}`);
+          return null;
+        })
       : null;
 
     const searchResponse = await searchWeb(query, {
@@ -3482,7 +3721,10 @@ async function runSingleWebLiveLookup(message, options = {}) {
       fallbackProviders,
       cacheTtlMs: 15 * 60 * 1000,
       mergeAcrossProviders: true
-    }).catch(() => null);
+    }).catch((err) => {
+      console.warn(`[web-live] searchWeb failed for "${query}": ${err?.message || err}`);
+      return null;
+    });
 
     const payloads = [xSearchResponse?.payload, searchResponse?.payload].filter((payload) => payload?.results?.length);
     const categoryPayload = payloads.length
@@ -3496,6 +3738,7 @@ async function runSingleWebLiveLookup(message, options = {}) {
         synthesisOnly: Boolean(options.synthesisOnly)
       });
       selectedQuery = query;
+      console.log(`[web-live] query="${query}" results=${categoryPayload.results.length} useful=${isUsefulOutcome(categoryOutcome)}`);
       if (isUsefulOutcome(categoryOutcome)) {
         selectedOutcome = categoryOutcome;
         break;
