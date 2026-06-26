@@ -4001,7 +4001,97 @@ async function runWebLiveLookup(message, options = {}) {
   if (!options.synthesisOnly && queryKind === "office" && detectOfficeRoles(message).length > 1) {
     return runMultiOfficeWebLiveLookup(message, options);
   }
+  if (!options.synthesisOnly && queryKind === "comparison") {
+    return runComparisonWebLiveLookup(message, options);
+  }
   return runSingleWebLiveLookup(message, options);
+}
+
+// Comparison queries: decompose into per-entity lookups for specific data
+async function runComparisonWebLiveLookup(message, options = {}) {
+  const entities = extractComparisonEntities(message);
+  const text = normalizeSearchText(message).toLowerCase();
+  const metricMatch = text.match(/\b(gdp|pdb|inflation|inflasi|unemployment|pengangguran|population|populasi|gini|hdi|ppp|debt|utang|trade balance|neraca perdagangan)\b/i);
+  const metric = metricMatch ? metricMatch[1] : "";
+  const yearMatch = text.match(/\b(20\d{2})\b/);
+  const year = yearMatch ? yearMatch[1] : "2024";
+
+  // If entities are explicit (e.g., "Germany France Italy GDP"), search per-entity
+  if (entities.length >= 2 && metric) {
+    const settled = await Promise.allSettled(entities.map((entity) => {
+      const subQuery = `${entity} ${metric} ${year}`;
+      return runSingleWebLiveLookup(subQuery, { ...options, forceLookup: true }).then((result) => ({
+        entity,
+        result
+      }));
+    }));
+
+    const allSummaries = [];
+    const allReplies = [];
+    for (const entry of settled) {
+      if (entry.status !== "fulfilled") continue;
+      const { entity, result } = entry.value;
+      if (result.summary) allSummaries.push(result.summary);
+      if (result.directReply) allReplies.push(result.directReply);
+    }
+
+    if (allReplies.length) {
+      return {
+        name: "web.live",
+        summary: allSummaries.filter(Boolean).join("\n"),
+        directReply: allReplies.join("\n"),
+        engine: { score: 0.8, evidence: [] }
+      };
+    }
+  }
+
+  // If region-based (e.g., "compare GDP in Asia"), pick top 3 and search per-entity
+  const region = extractRegionFromComparison(message);
+  if (metric && region) {
+    const topEntities = getDefaultEntitiesForRegion(text);
+    if (topEntities.length >= 2) {
+      const settled = await Promise.allSettled(topEntities.map((entity) => {
+        const subQuery = `${entity} ${metric} ${year}`;
+        return runSingleWebLiveLookup(subQuery, { ...options, forceLookup: true }).then((result) => ({
+          entity,
+          result
+        }));
+      }));
+
+      const allSummaries = [];
+      const allReplies = [];
+      for (const entry of settled) {
+        if (entry.status !== "fulfilled") continue;
+        const { entity, result } = entry.value;
+        if (result.summary) allSummaries.push(result.summary);
+        if (result.directReply) allReplies.push(result.directReply);
+      }
+
+      if (allReplies.length) {
+        return {
+          name: "web.live",
+          summary: allSummaries.filter(Boolean).join("\n"),
+          directReply: allReplies.join("\n"),
+          engine: { score: 0.8, evidence: [] }
+        };
+      }
+    }
+  }
+
+  // Fallback to single lookup
+  return runSingleWebLiveLookup(message, options);
+}
+
+// Default top entities for common regions
+function getDefaultEntitiesForRegion(text) {
+  if (/\b(eropa|europe|european)\b/.test(text)) return ["Germany", "United Kingdom", "France"];
+  if (/\b(asia|asian)\b/.test(text)) return ["China", "Japan", "India"];
+  if (/\b(asean)\b/.test(text)) return ["Indonesia", "Thailand", "Vietnam"];
+  if (/\b(afrika|africa|african)\b/.test(text)) return ["Nigeria", "South Africa", "Egypt"];
+  if (/\b(amerika|americas?)\b/.test(text)) return ["United States", "Brazil", "Canada"];
+  if (/\b(middle east|timur tengah)\b/.test(text)) return ["Saudi Arabia", "UAE", "Turkey"];
+  if (/\b(g20)\b/.test(text)) return ["United States", "China", "Japan"];
+  return ["United States", "China", "Japan"];
 }
 
 module.exports = {

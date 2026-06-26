@@ -460,12 +460,14 @@ Guidelines:
 - Note any data limitations or failed tasks
 - Use markdown formatting for readability
 - For comparison queries: use markdown tables with columns for each attribute being compared
-- Include specific numbers, dates, and sources — never say "data tidak spesifik" if any data point is available in the results
+- Include specific numbers, dates, and sources — never say "data tidak spesifik" or "data tidak ditemukan" if any data point is available in the results
 - If exact data is not found for an entity, state what IS known and note the gap explicitly
 - Normalize units (all USD, all EUR, etc.) for fair comparison
 - Rank or sort by the primary metric when applicable
-- NEVER ask the user "do you want me to search again?" — just provide what you found or state what's missing
-- NEVER apologize for search quality — just present the best available data`,
+- NEVER ask the user "do you want me to search again?" or "should I continue searching?" — just provide the best available answer or state what's missing
+- NEVER apologize for search quality — just present the best available data
+- NEVER say "maaf" or "sorry" — just give the answer
+- If you have ANY numbers, present them in a table. If you don't have numbers, say what you DO know.`,
     taskResults,
     failedTasks,
     userQuery: goal.description
