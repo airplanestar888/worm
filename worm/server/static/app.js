@@ -339,8 +339,43 @@ function normalizeFeatureLikeList(text = '') {
   return lines.join('\n');
 }
 
+// Strip LLM channel/marker artifacts (Hermes, Together, Qwen, DeepSeek, etc.)
+// These sometimes leak into user-visible output as raw protocol tokens.
+function stripLlmArtifacts(text = '') {
+  let out = String(text || '');
+
+  // 1) Extract content from "final" channel (this IS the user-facing answer)
+  //    Remove the opening marker, keep the body.
+  out = out.replace(/<\|channel\|>\s*final\s*/gi, '');
+  out = out.replace(/<\|channel>\s*final\s*/gi, '');
+
+  // 2) Strip entire "analysis", "commentary", "thought" channel blocks
+  //    These are internal reasoning — already handled by <think>` if present.
+  const channelBlock = /<\|channel\|?>\s*(?:analysis|commentary|thought)\b[\s\S]*?(?=<\|channel\|?>|<\|return\|?>|<\|end\|?>|<\|start\|?>|$)/gi;
+  out = out.replace(channelBlock, ' ');
+
+  // 3) Strip remaining standalone channel tags: <|channel|>xxx
+  out = out.replace(/<\|channel\|?>\s*\w+\s*/gi, ' ');
+
+  // 4) Strip structural protocol markers
+  out = out.replace(/<\|(?:start|end|message|return)\|?>/gi, ' ');
+
+  // 5) Strip bare malformed fragments like "channel|>" without opening
+  out = out.replace(/channel\|>/gi, '');
+
+  // 6) Strip role-injection markers like "assistant<|message|>" or "<|start|>assistant"
+  out = out.replace(/(?:^|\s)assistant\s*<\|message\|?>/gi, ' ');
+  out = out.replace(/<\|start\|?>\s*assistant/gi, ' ');
+
+  // 7) Clean up excess whitespace from removals
+  out = out.replace(/[ \t]{2,}/g, ' ');
+  out = out.replace(/\n{3,}/g, '\n\n');
+
+  return out.trim();
+}
+
 function extractThinkBlocks(raw = '') {
-  const text = String(raw || '')
+  const text = stripLlmArtifacts(String(raw || ''))
     .replace(/<minimax:tool_call>[\s\S]*?<\/minimax:tool_call>/gi, ' ')
     .replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, ' ')
     .replace(/<parameter\b[^>]*>[\s\S]*?<\/parameter>/gi, ' ')
@@ -377,7 +412,7 @@ function normalizeAnswerSource(source = '') {
 
 function normalizeDisplayAnswer(raw = '') {
   const codeBlocks = [];
-  let text = String(raw || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  let text = stripLlmArtifacts(raw).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
   text = text.replace(/```([\w.-]*)\n([\s\S]*?)```/g, (match) => {
     const key = `\x00DISPLAY_CODE_${codeBlocks.length}\x00`;

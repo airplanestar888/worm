@@ -194,12 +194,26 @@ function flushThinkParser(parser) {
 }
 
 function stripAssistantArtifacts(text) {
-  return String(text || "")
+  let out = String(text || "")
     .replace(/<minimax:tool_call>[\s\S]*?<\/minimax:tool_call>/gi, " ")
     .replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, " ")
     .replace(/<parameter\b[^>]*>[\s\S]*?<\/parameter>/gi, " ")
-    .replace(/<\/?(minimax:tool_call|invoke|parameter)\b[^>]*>/gi, " ")
+    .replace(/<\/?(minimax:tool_call|invoke|parameter)\b[^>]*>/gi, " ");
+
+  // Strip LLM channel/marker artifacts (Hermes, Together, Qwen, DeepSeek, etc.)
+  // Extract "final" channel content; strip analysis/commentary/thought channels.
+  out = out.replace(/<\|channel\|>\s*final\s*/gi, "");
+  out = out.replace(/<\|channel>\s*final\s*/gi, "");
+  out = out.replace(/<\|channel\|?>\s*(?:analysis|commentary|thought)\b[\s\S]*?(?=<\|channel\|?>|<\|return\|?>|<\|end\|?>|<\|start\|?>|$)/gi, " ");
+  out = out.replace(/<\|channel\|?>\s*\w+\s*/gi, " ");
+  out = out.replace(/<\|(?:start|end|message|return)\|?>/gi, " ");
+  out = out.replace(/channel\|>/gi, "");
+  out = out.replace(/(?:^|\s)assistant\s*<\|message\|?>/gi, " ");
+  out = out.replace(/<\|start\|?>\s*assistant/gi, " ");
+
+  return out
     .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
     .trim();
 }
 
