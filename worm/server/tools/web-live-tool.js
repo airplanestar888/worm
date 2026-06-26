@@ -471,17 +471,46 @@ function sanitizeSearchQueryText(message) {
   return (casualStripped.length >= 3 ? casualStripped : normalized).trim();
 }
 
+// Common 4-5 letter English/Indonesian words that are NOT stock tickers
+const NON_TICKER_WORDS = new Set([
+  "what", "when", "where", "which", "while", "whose",
+  "open", "close", "start", "begin", "ended",
+  "chat", "talk", "speak", "tells",
+  "help", "need", "want", "like", "love",
+  "this", "that", "these", "those", "them",
+  "with", "from", "into", "onto", "upon",
+  "just", "only", "also", "both", "each",
+  "have", "been", "were", "will", "shall",
+  "could", "would", "should", "might",
+  "about", "after", "below", "above",
+  "every", "other", "another",
+  "price", "costs", "worth", "value",
+  "check", "cek", "look", "find", "show",
+  "tell", "give", "take", "make", "made",
+  "going", "comes", "doing", "says", "said",
+  "today", "right", "still", "never",
+  "hello", "thanks", "thank", "please",
+  "harga", "saham", "stock", "ticker", "index"
+]);
+
 function isStockQuery(message) {
   const original = String(message || "");
   const lower = normalizeSearchText(message).toLowerCase();
+  const tickerMatch = original.match(/\b([A-Z]{4,5})\b/);
   return /\b(saham|stock|ticker|idx)\b/.test(lower)
-    || /\b([A-Z]{4,5})\b/.test(original)
+    || (tickerMatch && !NON_TICKER_WORDS.has(tickerMatch[1]?.toLowerCase()))
     || (/\b[a-z]{4,5}\b/.test(lower) && /\b(itu saham apa|saham apa|kode saham apa|what stock)\b/.test(lower));
 }
 
+// Memoization cache for normalizeSearchText
+const normalizeCache = new Map();
+const NORMALIZE_CACHE_MAX = 500;
+
 function normalizeSearchText(message) {
-  return String(message || "")
-    .trim()
+  const key = String(message || "").trim();
+  if (normalizeCache.has(key)) return normalizeCache.get(key);
+
+  const result = key
     .replace(/\bchat\s*gpt\b/gi, "chatgpt")
     .replace(/\betherium\b/gi, "ethereum")
     .replace(/\bbtc\b/gi, "bitcoin")
@@ -492,6 +521,18 @@ function normalizeSearchText(message) {
     .replace(/\bjawatimur\b/gi, "jawa timur")
     .replace(/\bjawatengah\b/gi, "jawa tengah")
     .replace(/\bamerika\b(?!\s+serikat)/gi, "amerika serikat");
+
+  // Enforce cache size limit
+  if (normalizeCache.size >= NORMALIZE_CACHE_MAX) {
+    // Remove oldest entries
+    const entries = normalizeCache.entries();
+    for (let i = 0; i < Math.floor(NORMALIZE_CACHE_MAX * 0.2); i++) {
+      normalizeCache.delete(entries.next().value[0]);
+    }
+  }
+
+  normalizeCache.set(key, result);
+  return result;
 }
 
 function extractFirstUrl(message = "") {
@@ -1774,12 +1815,12 @@ function extractOfficeSubject(message) {
 function extractTicker(message) {
   const original = String(message || "");
   const upperTicker = original.match(/\b([A-Z]{4,5})\b/);
-  if (upperTicker?.[1]) return upperTicker[1];
+  if (upperTicker?.[1] && !NON_TICKER_WORDS.has(upperTicker[1].toLowerCase())) return upperTicker[1];
   const lower = normalizeSearchText(message).toLowerCase();
   if (!/\b(saham|stock|ticker|idx|itu saham apa|saham apa|kode saham apa|what stock)\b/.test(lower)) return "";
   const lowerTicker = lower.match(/\b([a-z]{4,5})\b/);
   if (!lowerTicker?.[1]) return "";
-  if (["harga", "saham", "stock", "today", "todays", "right", "current", "itu", "apa", "kode"].includes(lowerTicker[1])) return "";
+  if (NON_TICKER_WORDS.has(lowerTicker[1])) return "";
   return lowerTicker[1].toUpperCase();
 }
 
@@ -3574,9 +3615,10 @@ function isSubstantiveToolRouteResult(result) {
 }
 
 async function resolveCategorySources({ client, message, route, options = {} }) {
-  let fallbackCandidate = null;
+  const sources = route.sources || [];
 
-  for (const source of route.sources || []) {
+  // Run all sources in parallel for better performance
+  const sourcePromises = sources.map(async (source) => {
     let candidate = null;
 
     try {
@@ -3605,9 +3647,22 @@ async function resolveCategorySources({ client, message, route, options = {} }) 
       candidate = null;
     }
 
-    if (!candidate) continue;
+    if (!candidate) return { source, finalized: null };
 
     const finalized = finalizeToolRouteResult(candidate, options);
+    return { source, finalized };
+  });
+
+  const results = await Promise.allSettled(sourcePromises);
+
+  // Find first substantive result
+  let fallbackCandidate = null;
+
+  for (const result of results) {
+    if (result.status !== "fulfilled" || !result.value?.finalized) continue;
+
+    const { source, finalized } = result.value;
+
     if (isSubstantiveToolRouteResult(finalized)) {
       return finalized;
     }
@@ -3701,9 +3756,10 @@ async function runSingleWebLiveLookup(message, options = {}) {
 
   const { primaryProviders, fallbackProviders, xPrimaryProviders, xFallbackProviders } = createRouteSearchProviders(client, message, route, queryKind);
 
-  let selectedQuery = "";
-  let selectedOutcome = null;
-  for (const query of queries) {
+  // Run queries in parallel batches for better performance
+  const PARALLEL_BATCH_SIZE = 3;
+
+  async function executeQuery(query) {
     const xSearchResponse = (xPrimaryProviders.length || xFallbackProviders.length)
       ? await xSearch(query, {
           primaryProviders: xPrimaryProviders,
@@ -3731,7 +3787,21 @@ async function runSingleWebLiveLookup(message, options = {}) {
       ? mergePayloads(payloads)
       : (searchResponse?.payload || xSearchResponse?.payload || null);
 
-    if (categoryPayload?.results?.length) {
+    return { query, categoryPayload };
+  }
+
+  let selectedQuery = "";
+  let selectedOutcome = null;
+
+  // Process queries in parallel batches
+  for (let i = 0; i < queries.length; i += PARALLEL_BATCH_SIZE) {
+    const batch = queries.slice(i, i + PARALLEL_BATCH_SIZE);
+    const results = await Promise.allSettled(batch.map(executeQuery));
+
+    for (const result of results) {
+      if (result.status !== "fulfilled" || !result.value?.categoryPayload?.results?.length) continue;
+
+      const { query, categoryPayload } = result.value;
       const categoryOutcome = evaluateSearchPayload(message, queryKind, query, categoryPayload, {
         routeCategory: route.category,
         secondHop,
@@ -3745,6 +3815,9 @@ async function runSingleWebLiveLookup(message, options = {}) {
       }
       selectedOutcome = categoryOutcome;
     }
+
+    // Stop if we found a useful outcome
+    if (selectedOutcome && isUsefulOutcome(selectedOutcome)) break;
   }
 
   if (!selectedOutcome) {

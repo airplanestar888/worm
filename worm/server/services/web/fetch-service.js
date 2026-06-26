@@ -5,13 +5,21 @@ const httpFetchProvider = require("./providers/http-fetch");
 const jinaFetchProvider = require("./providers/jina-fetch");
 
 const DEFAULT_TTL_MS = 15 * 60 * 1000;
+const ERROR_TTL_MS = 60 * 1000; // 1 minute for errors to allow quick retry
 
 async function fetchPage(url, options = {}) {
   const routing = detectUrlRouting(url);
   const ttlMs = Number(options.cacheTtlMs || DEFAULT_TTL_MS);
   const cacheKey = getCacheKey([url, options.extractMode || "text"]);
   const cached = getCached("web-fetch", cacheKey);
-  if (cached) return { ...cached, cached: true };
+  if (cached) {
+    // Don't return cached errors if they're stale
+    if (!cached.ok && cached._cachedAt && Date.now() - cached._cachedAt > ERROR_TTL_MS) {
+      // Error cache expired, retry
+    } else {
+      return { ...cached, cached: true };
+    }
+  }
 
   const primaryProviders = Array.isArray(options.primaryProviders) && options.primaryProviders.length
     ? options.primaryProviders
@@ -43,7 +51,8 @@ async function fetchPage(url, options = {}) {
     }
   }
 
-  return setCached("web-fetch", cacheKey, lastResult, ttlMs);
+  // Cache errors with short TTL to prevent hammering failing services
+  return setCached("web-fetch", cacheKey, { ...lastResult, _cachedAt: Date.now() }, ERROR_TTL_MS);
 }
 
 module.exports = {

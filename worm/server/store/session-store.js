@@ -108,7 +108,9 @@ function createSession({ workspace = HOME_WORKSPACE, provider = "ollama", model,
     surfaceMode: surfaceMode === "deep_surf" ? "deep_surf" : "local",
     createdAt: now,
     updatedAt: now,
-    messages: []
+    messages: [],
+    goals: [],
+    activeGoalId: null
   };
   writeSession(session);
   updateSessionIndex(session);

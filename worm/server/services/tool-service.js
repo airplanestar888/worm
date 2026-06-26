@@ -10,6 +10,7 @@ const {
   streamNvidiaChat,
   streamOllamaChat
 } = require("./provider-service");
+const { detectGoalIntent, planGoalTasks } = require("./goal-service");
 
 const ORCHESTRATOR_CATEGORY_HINTS = [
   "crypto_price",
@@ -148,21 +149,50 @@ function getContextualOfficeFollowup(session, message = "") {
 function formatToolContext(results) {
   if (!results.length) return "";
 
+  const MAX_CONTEXT_CHARS = 12000; // ~3000 tokens
+  const MAX_SINGLE_CONTEXT_CHARS = 4000; // ~1000 tokens per result
+
   const lines = [
     "Fresh tool results for this turn:",
-    ...results.flatMap((result) => {
-      const engineBits = [];
-      if (Number.isFinite(result?.engine?.score)) engineBits.push(`score=${result.engine.score}`);
-      if (Array.isArray(result?.engine?.evidence) && result.engine.evidence.length) engineBits.push(`evidence=${result.engine.evidence.map((item) => `${item.sourceLabel}:${item.confidence}`).join(", ")}`);
-      const suffix = engineBits.length ? ` [${engineBits.join(" | ")}]` : "";
-      const blocks = [`- [${result.name}] ${result.summary}${suffix}`];
-      if (result?.contextText) {
-        blocks.push(`Context from ${result.name}:\n${String(result.contextText).trim()}`);
-      }
-      return blocks;
-    }),
-    "Use these results when relevant. If a tool failed, mention the limitation briefly instead of inventing data."
   ];
+
+  let totalChars = lines[0].length;
+
+  for (const result of results) {
+    const engineBits = [];
+    if (Number.isFinite(result?.engine?.score)) engineBits.push(`score=${result.engine.score}`);
+    if (Array.isArray(result?.engine?.evidence) && result.engine.evidence.length) {
+      engineBits.push(`evidence=${result.engine.evidence.map((item) => `${item.sourceLabel}:${item.confidence}`).join(", ")}`);
+    }
+    const suffix = engineBits.length ? ` [${engineBits.join(" | ")}]` : "";
+    const summaryLine = `- [${result.name}] ${result.summary}${suffix}`;
+
+    if (totalChars + summaryLine.length > MAX_CONTEXT_CHARS) break;
+    lines.push(summaryLine);
+    totalChars += summaryLine.length;
+
+    if (result?.contextText) {
+      let context = String(result.contextText).trim();
+      // Truncate individual context if too long
+      if (context.length > MAX_SINGLE_CONTEXT_CHARS) {
+        context = context.slice(0, MAX_SINGLE_CONTEXT_CHARS) + "... [truncated]";
+      }
+      const contextBlock = `Context from ${result.name}:\n${context}`;
+
+      if (totalChars + contextBlock.length > MAX_CONTEXT_CHARS) {
+        // Try to fit a truncated version
+        const remaining = MAX_CONTEXT_CHARS - totalChars - 50;
+        if (remaining > 100) {
+          lines.push(`Context from ${result.name}:\n${context.slice(0, remaining)}... [truncated]`);
+        }
+        break;
+      }
+      lines.push(contextBlock);
+      totalChars += contextBlock.length;
+    }
+  }
+
+  lines.push("Use these results when relevant. If a tool failed, mention the limitation briefly instead of inventing data.");
 
   return lines.join("\n");
 }
@@ -247,9 +277,9 @@ async function runRoutingOrchestrator(message, options = {}) {
     "crypto_price, crypto_price_historical, gold_price, staple_price, forex_price, general_price, stock, technology_news, sports_news, economy_news, general_news, office, person_relation, count, server_status, network",
     "",
     "## Decision rules",
-    "- IMPORTANT: Only use tools when the request is CLEAR and SPECIFIC. If ambiguous, return tool=none and let the main LLM ask for clarification.",
-    "- Ambiguous requests that should return tool=none: 'ping' (no host), 'cek' (no target), 'berapa harga' (no asset), 'bisa ping?' (question, not request).",
-    "- Clear requests that should trigger tools: 'ping google.com', 'harga bitcoin', 'cek status server', 'ip address facebook.com'.",
+    "- Prefer action over hesitation. When in doubt, use a tool — better to fetch and not need than to miss data.",
+    "- Make reasonable assumptions for ambiguous requests: 'ping' → google.com, 'cek' → server status, 'harga' → bitcoin.",
+    "- Only return tool=none when the request is clearly conversational (greetings, opinions, creative writing).",
     "",
     "- When in doubt between live and local, prefer live — better to fetch and not need than to miss current data.",
     "- Any question about current prices, rates, news, status, leaders, schedules, scores => live + web.live.",
@@ -259,7 +289,7 @@ async function runRoutingOrchestrator(message, options = {}) {
     "- Pure time/date only (jam, waktu, tanggal) => live + time.now.",
     "- Server status, CPU, RAM, disk, uptime, processes, ports => diagnostic + server.status.",
     "- Network check WITH specific host/domain/IP => diagnostic + network.check.",
-    "- Network check WITHOUT specific target => tool=none (let LLM ask for clarification).",
+    "- Network check WITHOUT specific target => diagnostic + network.check with default target (google.com).",
     "- Stable knowledge, math, language, opinion, creative writing, general chat => local + none.",
     "",
     "## query field",
@@ -283,64 +313,76 @@ async function runRoutingOrchestrator(message, options = {}) {
     { role: "user", content: String(message || "") }
   ];
 
-  const raw = await new Promise(async (resolve, reject) => {
-    let streamResponse;
-    try {
-      streamResponse = provider === "nvidia"
-        ? await streamNvidiaChat({ model, messages, mode: "low" })
-        : provider === "hermes"
-          ? await streamHermesChat({ model, messages, mode: "low" })
-          : await streamOllamaChat({ model, messages, mode: "low" });
-    } catch (error) {
-      reject(error);
-      return;
-    }
+  const ORCHESTRATOR_TIMEOUT_MS = 15000;
+
+  const streamPromise = (async () => {
+    const streamResponse = provider === "nvidia"
+      ? await streamNvidiaChat({ model, messages, mode: "low" })
+      : provider === "hermes"
+        ? await streamHermesChat({ model, messages, mode: "low" })
+        : await streamOllamaChat({ model, messages, mode: "low" });
 
     const stream = streamResponse.data;
     const isSse = provider === "nvidia" || provider === "hermes";
-    let buffer = "";
-    let fullText = "";
 
-    const cleanup = () => {
-      stream.removeAllListeners("data");
-      stream.removeAllListeners("end");
-      stream.removeAllListeners("error");
-    };
+    return new Promise((resolve, reject) => {
+      let buffer = "";
+      let fullText = "";
 
-    stream.on("data", (chunk) => {
-      buffer += chunk.toString();
-      const parts = isSse ? buffer.split("\n\n") : buffer.split("\n");
-      buffer = parts.pop() || "";
+      const cleanup = () => {
+        stream.removeAllListeners("data");
+        stream.removeAllListeners("end");
+        stream.removeAllListeners("error");
+      };
 
-      for (const part of parts) {
-        const line = isSse
-          ? part.split("\n").find((entry) => entry.startsWith("data: "))
-          : part.trim();
-        if (!line) continue;
-        const rawLine = isSse ? line.slice(6).trim() : line.trim();
-        if (!rawLine || rawLine === "[DONE]") continue;
+      const timeout = setTimeout(() => {
+        cleanup();
+        stream.destroy?.();
+        reject(new Error("Orchestrator timeout"));
+      }, ORCHESTRATOR_TIMEOUT_MS);
 
-        try {
-          const parsed = JSON.parse(rawLine);
-          const token = isSse
-            ? parsed?.choices?.[0]?.delta?.content || ""
-            : parsed?.message?.content || "";
-          if (token) fullText += token;
-        } catch {
-          // ignore partial lines
+      stream.on("data", (chunk) => {
+        buffer += chunk.toString();
+        const parts = isSse ? buffer.split("\n\n") : buffer.split("\n");
+        buffer = parts.pop() || "";
+
+        for (const part of parts) {
+          const line = isSse
+            ? part.split("\n").find((entry) => entry.startsWith("data: "))
+            : part.trim();
+          if (!line) continue;
+          const rawLine = isSse ? line.slice(6).trim() : line.trim();
+          if (!rawLine || rawLine === "[DONE]") continue;
+
+          try {
+            const parsed = JSON.parse(rawLine);
+            const token = isSse
+              ? parsed?.choices?.[0]?.delta?.content || ""
+              : parsed?.message?.content || "";
+            if (token) fullText += token;
+          } catch {
+            // ignore partial lines
+          }
         }
-      }
-    });
+      });
 
-    stream.on("end", () => {
-      cleanup();
-      resolve(String(fullText || buffer || "").trim());
-    });
+      stream.on("end", () => {
+        clearTimeout(timeout);
+        cleanup();
+        resolve(String(fullText || buffer || "").trim());
+      });
 
-    stream.on("error", (error) => {
-      cleanup();
-      reject(error);
+      stream.on("error", (error) => {
+        clearTimeout(timeout);
+        cleanup();
+        reject(error);
+      });
     });
+  })();
+
+  const raw = await streamPromise.catch((error) => {
+    console.warn(`[orchestrator] stream error: ${error.message}`);
+    return "";
   });
 
   try {
@@ -365,6 +407,42 @@ async function resolveToolContext(message, options = {}) {
     ? getContextualOfficeFollowup(options.session, message)
     : null;
   const effectiveMessage = followup?.originalMessage || contextualOfficeFollowup?.originalMessage || message;
+
+  // --- Goal detection for complex multi-step requests ---
+  // Only check in deep_surf mode and if session doesn't already have an active goal
+  const session = options.session;
+  const hasActiveGoal = session?.activeGoalId && session?.goals?.some(g => g.id === session.activeGoalId && g.status === "executing");
+
+  if (surfaceMode === "deep_surf" && !hasActiveGoal && !followup && !contextualOfficeFollowup) {
+    try {
+      const goalIntent = await detectGoalIntent(effectiveMessage, {
+        provider: session?.provider,
+        model: session?.model
+      });
+
+      if (goalIntent.isGoal && goalIntent.estimatedTasks >= 3) {
+        console.log(`[goal] Detected goal intent: ${goalIntent.reason} (${goalIntent.estimatedTasks} tasks)`);
+
+        // Plan the goal tasks
+        const goal = await planGoalTasks(effectiveMessage, {
+          provider: session?.provider,
+          model: session?.model
+        });
+
+        console.log(`[goal] Planned ${goal.tasks.length} tasks for goal ${goal.id}`);
+
+        return {
+          toolResults: [],
+          toolContext: "",
+          directReply: "",
+          goalExecution: goal
+        };
+      }
+    } catch (error) {
+      console.warn(`[goal] Goal detection failed: ${error.message}`);
+      // Continue with normal flow
+    }
+  }
 
   // --- Regex heuristics (used as hint for LLM, fallback when LLM unavailable) ---
   const heuristicNeedsLiveWeb = needsWebLiveLookup(effectiveMessage);

@@ -129,15 +129,99 @@ function fallbackBrokenOrderedListsToBullets(text = '') {
   return lines.map((line) => line.replace(/^\s*\d+\.\s+(\S.*)$/, '- $1')).join('\n');
 }
 
+// Parse markdown tables into HTML and replace with placeholders
+function parseMarkdownTables(text, tablePlaceholders) {
+  const lines = text.split('\n');
+  const result = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    // Check if this line starts a table
+    if (lines[i].trim().startsWith('|') && i + 1 < lines.length && /^\|[\s:-]+\|/.test(lines[i + 1].trim())) {
+      const tableLines = [];
+      let j = i;
+
+      // Collect all table lines
+      while (j < lines.length && lines[j].trim().startsWith('|')) {
+        tableLines.push(lines[j].trim());
+        j++;
+      }
+
+      if (tableLines.length >= 3) {
+        // Parse header
+        const headers = tableLines[0]
+          .split('|')
+          .map(cell => cell.trim())
+          .filter(cell => cell.length > 0);
+
+        // Parse alignment from separator row
+        const aligns = tableLines[1]
+          .split('|')
+          .map(cell => cell.trim())
+          .filter(cell => cell.length > 0)
+          .map(cell => {
+            if (cell.startsWith(':') && cell.endsWith(':')) return 'center';
+            if (cell.endsWith(':')) return 'right';
+            return 'left';
+          });
+
+        // Parse data rows
+        const rows = tableLines.slice(2).map(row =>
+          row.split('|')
+            .map(cell => cell.trim())
+            .filter(cell => cell.length > 0)
+        );
+
+        // Build HTML table
+        let tableHtml = '<div class="table-wrapper"><table>';
+        tableHtml += '<thead><tr>';
+        headers.forEach((header, idx) => {
+          const align = aligns[idx] || 'left';
+          tableHtml += `<th style="text-align:${align}">${inlineFormat(header)}</th>`;
+        });
+        tableHtml += '</tr></thead>';
+
+        tableHtml += '<tbody>';
+        rows.forEach(row => {
+          tableHtml += '<tr>';
+          row.forEach((cell, idx) => {
+            const align = aligns[idx] || 'left';
+            tableHtml += `<td style="text-align:${align}">${inlineFormat(cell)}</td>`;
+          });
+          tableHtml += '</tr>';
+        });
+        tableHtml += '</tbody></table></div>';
+
+        // Replace with placeholder
+        const placeholderIdx = tablePlaceholders.length;
+        tablePlaceholders.push(tableHtml);
+        result.push(`\x00TABLE${placeholderIdx}\x00`);
+        i = j;
+        continue;
+      }
+    }
+
+    result.push(lines[i]);
+    i++;
+  }
+
+  return result.join('\n');
+}
+
 function renderMarkdown(raw) {
   if (!raw) return '';
   const cb = [];
+  const tablePlaceholders = [];
   let text = String(raw).replace(/```([\w.-]*)\r?\n([\s\S]*?)```/g, (_, lang, code) => {
     const i = cb.length;
     const label = escapeHtml(lang.trim()) || 'text';
     cb.push(`<div class="code-block"><div class="code-lang">${label}</div><code>${escapeHtml(code.replace(/\n$/, ''))}</code></div>`);
     return `\x00CB${i}\x00`;
   });
+
+  // Parse tables before other processing
+  text = parseMarkdownTables(text, tablePlaceholders);
+
   text = mergeOrderedListDescriptions(fallbackBrokenOrderedListsToBullets(renumberRepeatedOrderedItems(text)));
   const lines = text.split('\n');
   const out = [];
@@ -185,9 +269,10 @@ function renderMarkdown(raw) {
       continue;
     }
 
+    const isTableBlock = line.includes('\x00TABLE');
     if (inUl) { out.push('</ul>'); inUl = false; }
     if (inOl) { out.push('</ol>'); inOl = false; }
-    if (isCodeBlock) {
+    if (isCodeBlock || isTableBlock) {
       flushParagraph();
       out.push(line);
     } else {
@@ -200,6 +285,7 @@ function renderMarkdown(raw) {
   if (inOl) out.push('</ol>');
   let html = out.join('\n');
   html = html.replace(/\x00CB(\d+)\x00/g, (_, i) => cb[Number(i)]);
+  html = html.replace(/\x00TABLE(\d+)\x00/g, (_, i) => tablePlaceholders[Number(i)]);
   return html || `<p>${escapeHtml(raw)}</p>`;
 }
 
@@ -485,6 +571,70 @@ function showSelectionToast(message) {
   selectionToastTimer = setTimeout(() => {
     selectionToast.classList.remove('open');
   }, 1800);
+}
+
+// Goal progress rendering
+function renderGoalProgress(container, goalData) {
+  let goalEl = container.querySelector('.goal-progress');
+
+  // Create goal UI if it doesn't exist
+  if (!goalEl) {
+    goalEl = document.createElement('div');
+    goalEl.className = 'goal-progress';
+    const answerSlot = container.querySelector('.assistant-answer-slot');
+    if (answerSlot) {
+      container.insertBefore(goalEl, answerSlot);
+    } else {
+      container.appendChild(goalEl);
+    }
+  }
+
+  const progress = goalData.progress || 0;
+  const statusIcon = goalData.status === 'completed' ? '✅' :
+                     goalData.status === 'failed' ? '❌' : '🎯';
+  const statusText = goalData.status === 'completed' ? 'Completed' :
+                     goalData.status === 'failed' ? 'Failed' : 'In Progress';
+
+  // Tool icons mapping
+  const toolIcons = {
+    'web.live': '🌐',
+    'time.now': '🕐',
+    'server.status': '🖥️',
+    'network.check': '📡',
+    'synthesis': '🧠'
+  };
+
+  // Build tasks HTML
+  let tasksHTML = '';
+  if (goalData.tasks && goalData.tasks.length > 0) {
+    tasksHTML = '<div class="goal-tasks">' +
+      goalData.tasks.map(task => {
+        const taskIcon = task.status === 'completed' ? '✓' :
+                        task.status === 'running' ? '⟳' :
+                        task.status === 'failed' ? '✗' : '○';
+        const taskClass = task.status || 'pending';
+        const toolIcon = task.tool ? `<span class="task-tool-icon" title="${escapeHtml(task.tool)}">${toolIcons[task.tool] || '🔧'}</span>` : '';
+        return `<div class="task ${taskClass}"><span class="task-icon">${taskIcon}</span> <span class="task-desc">${escapeHtml(task.description)}</span> ${toolIcon}</div>`;
+      }).join('') +
+      '</div>';
+  }
+
+  goalEl.innerHTML = `
+    <div class="goal-header">
+      <span class="goal-icon">${statusIcon}</span>
+      <span class="goal-title">${escapeHtml(goalData.description || 'Processing...')}</span>
+      <span class="goal-status">${statusText}</span>
+    </div>
+    <div class="goal-bar">
+      <div class="goal-bar-fill" style="width: ${progress}%"></div>
+    </div>
+    <div class="goal-progress-text">${progress}% complete</div>
+    ${tasksHTML}
+  `;
+
+  // Hide thinking dots when goal appears
+  const thinkingEl = container.querySelector('.thinking');
+  if (thinkingEl) thinkingEl.style.display = 'none';
 }
 
 function formatModelLabel(model = '') {
@@ -1284,6 +1434,12 @@ async function sendMessage() {
           if (reasoningText) reasoningText.textContent = mergedReasoning;
           if (answerBox) answerBox.innerHTML = renderAnswerWithSource(fullText);
           else pendingBody.textContent = fullText;
+          scrollToBottom();
+        }
+
+        // Goal progress handling
+        if (payload.goal) {
+          renderGoalProgress(pendingBody, payload.goal);
           scrollToBottom();
         }
 

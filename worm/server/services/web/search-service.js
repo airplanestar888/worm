@@ -38,7 +38,10 @@ async function searchWeb(query, options = {}) {
 
   const primaryPayloads = [];
   for (const provider of primaryProviders) {
-    const payload = await runProvider(provider, query, options).catch(() => null);
+    const payload = await runProvider(provider, query, options).catch((err) => {
+      console.warn(`[search] primary provider ${provider.id} failed for "${query}": ${err?.message || err}`);
+      return null;
+    });
     if (!payload) continue;
     primaryPayloads.push(payload);
     if (!mergeAcrossProviders && payload.results.length) {
@@ -48,7 +51,10 @@ async function searchWeb(query, options = {}) {
 
   const fallbackPayloads = [];
   for (const provider of fallbackProviders) {
-    const payload = await runProvider(provider, query, options).catch(() => null);
+    const payload = await runProvider(provider, query, options).catch((err) => {
+      console.warn(`[search] fallback provider ${provider.id} failed for "${query}": ${err?.message || err}`);
+      return null;
+    });
     if (!payload) continue;
     fallbackPayloads.push(payload);
     if (!mergeAcrossProviders && payload.results.length && !primaryPayloads.some((item) => item.results.length)) {

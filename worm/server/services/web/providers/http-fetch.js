@@ -1,15 +1,6 @@
 const axios = require("axios");
 const { normalizePageResult, normalizeError } = require("../normalize");
-
-function stripHtml(html) {
-  return String(html || "")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+const { stripHtml } = require("../../../utils/web-utils");
 
 async function fetchWithHttp(url, options = {}) {
   const routing = options.routing || {};
@@ -28,6 +19,8 @@ async function fetchWithHttp(url, options = {}) {
     const response = await axios.get(url, {
       timeout: Number(options.timeoutMs || 15000),
       maxRedirects: 3,
+      maxContentLength: 5 * 1024 * 1024, // 5MB max response size
+      maxBodyLength: 5 * 1024 * 1024,
       proxy: false,
       responseType: "text",
       headers: {

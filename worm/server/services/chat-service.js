@@ -13,6 +13,7 @@ const {
   verifySession,
   writeSession
 } = require("../store/session-store");
+const { executeGoal, buildSynthesisPrompt, getGoalProgress, GOAL_STATUS } = require("./goal-service");
 const { readSoulPrompt } = require("../soul");
 const { buildCurrentTimeSystemLine, resolveToolContext } = require("./tool-service");
 const {
@@ -57,27 +58,75 @@ function buildProviderMessages(session, systemText, provider) {
     .map((m) => ({ role: m.role, content: String(m.content || "(No response)") }))
     .filter((m) => m.role !== "assistant" || !isOperationalErrorContent(m.content));
 
-  const selected = [];
-  let used = estimateTokens(systemText);
+  if (!history.length) {
+    return [{ role: "system", content: systemText }];
+  }
 
+  // Find the first user message (likely contains the conversation goal)
+  const firstUserIndex = history.findIndex((m) => m.role === "user");
+  const firstUserMessage = firstUserIndex >= 0 ? history[firstUserIndex] : null;
+  const firstUserCost = firstUserMessage ? estimateTokens(firstUserMessage.content) : 0;
+
+  // Reserve space for system prompt and first user message
+  const reservedTokens = estimateTokens(systemText) + firstUserCost;
+
+  // If even system + first user doesn't fit, fall back to just system + last messages
+  if (reservedTokens >= budget) {
+    // Original behavior: greedy from end
+    const selected = [];
+    let used = estimateTokens(systemText);
+
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      const message = history[i];
+      const cost = estimateTokens(message.content);
+
+      if (selected.length > 0 && used + cost > budget) continue;
+
+      if (selected.length > 0 && selected[0].role === message.role) {
+        selected[0].content = `${message.content}\n\n${selected[0].content}`;
+      } else {
+        selected.unshift({ ...message });
+      }
+      used += cost;
+
+      if (used >= budget) break;
+    }
+
+    return [{ role: "system", content: systemText }, ...selected];
+  }
+
+  // Build context: system + first user message (goal) + recent messages that fit
+  const remainingBudget = budget - reservedTokens;
+  const recentMessages = [];
+  let recentUsed = 0;
+
+  // Greedy from end for recent messages, excluding the first user message
   for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (i === firstUserIndex) continue; // Skip first user, we'll add it separately
+
     const message = history[i];
     const cost = estimateTokens(message.content);
 
-    if (selected.length > 0 && used + cost > budget) continue;
+    if (recentMessages.length > 0 && recentUsed + cost > remainingBudget) continue;
 
-    // Collapse consecutive messages of the same role
-    if (selected.length > 0 && selected[0].role === message.role) {
-      selected[0].content = `${message.content}\n\n${selected[0].content}`;
+    if (recentMessages.length > 0 && recentMessages[0].role === message.role) {
+      recentMessages[0].content = `${message.content}\n\n${recentMessages[0].content}`;
     } else {
-      selected.unshift({ ...message });
+      recentMessages.unshift({ ...message });
     }
-    used += cost;
+    recentUsed += cost;
 
-    if (used >= budget) break;
+    if (recentUsed >= remainingBudget) break;
   }
 
-  return [{ role: "system", content: systemText }, ...selected];
+  // Combine: system + first user (goal) + recent messages
+  const result = [{ role: "system", content: systemText }];
+  if (firstUserMessage) {
+    result.push(firstUserMessage);
+  }
+  result.push(...recentMessages);
+
+  return result;
 }
 
 function trailingTagPrefixLength(text, tag) {
@@ -492,7 +541,144 @@ async function handleChatStream(req, res) {
     res.end();
   };
 
-  const { toolContext, directReply } = await resolveToolContext(message, { surfaceMode, session });
+  const { toolContext, directReply, goalExecution } = await resolveToolContext(message, { surfaceMode, session });
+
+  // --- Goal Execution Flow ---
+  if (goalExecution) {
+    // Save goal to session
+    if (!session.goals) session.goals = [];
+    session.goals.push(goalExecution);
+    session.activeGoalId = goalExecution.id;
+    writeSession(session);
+
+    // Send goal planning event
+    res.write(`data: ${JSON.stringify({
+      goal: {
+        id: goalExecution.id,
+        status: goalExecution.status,
+        description: goalExecution.description,
+        tasks: goalExecution.tasks.map(t => ({ id: t.id, description: t.description, status: t.status, tool: t.tool })),
+        progress: 0
+      }
+    })}\n\n`);
+
+    // Execute goal with progress streaming
+    try {
+      await executeGoal(goalExecution, {
+        provider: session.provider,
+        model: session.model
+      }, (task, eventType) => {
+        if (requestClosed || res.writableEnded) return;
+
+        const progress = getGoalProgress(goalExecution);
+        res.write(`data: ${JSON.stringify({
+          goal: {
+            id: goalExecution.id,
+            status: goalExecution.status,
+            taskId: task.id,
+            taskStatus: task.status,
+            taskDescription: task.description,
+            eventType,
+            progress,
+            tasks: goalExecution.tasks.map(t => ({
+              id: t.id,
+              description: t.description,
+              status: t.status,
+              tool: t.tool
+            }))
+          }
+        })}\n\n`);
+      });
+
+      // Synthesize results
+      const synthesisPrompt = buildSynthesisPrompt(goalExecution);
+      const synthesisSystemText = buildSystem(mode, synthesisPrompt.systemPrompt);
+      const synthesisMessages = [
+        { role: "system", content: synthesisSystemText },
+        { role: "user", content: `Based on the following research results, provide a comprehensive answer.\n\n${synthesisPrompt.taskResults}${synthesisPrompt.failedTasks ? `\n\nFailed tasks:\n${synthesisPrompt.failedTasks}` : ""}` }
+      ];
+
+      // Use LLM for synthesis
+      const synthesisResponse = await openProviderStreamWithRetry({
+        provider: resolvedProvider,
+        model,
+        messages: synthesisMessages,
+        mode,
+        attempts: 2
+      });
+
+      if (!requestClosed && !res.writableEnded) {
+        providerStream = synthesisResponse.data;
+        cleanupActiveStream = registerSessionStream(session.id, { stream: providerStream });
+
+        const isSse = resolvedProvider === "nvidia" || resolvedProvider === "hermes";
+        let buffer = "";
+        let fullReply = "";
+        let fullReasoning = "";
+        const thinkParser = createThinkParser();
+
+        providerStream.on("data", (chunk) => {
+          if (requestClosed || res.writableEnded) return;
+          buffer += chunk.toString();
+          const parts = isSse ? buffer.split("\n\n") : buffer.split("\n");
+          buffer = parts.pop() || "";
+
+          for (const part of parts) {
+            const line = isSse
+              ? part.split("\n").find((entry) => entry.startsWith("data: "))
+              : part.trim();
+            if (!line) continue;
+            const rawLine = isSse ? line.slice(6).trim() : line.trim();
+            if (!rawLine || rawLine === "[DONE]") continue;
+
+            try {
+              const parsed = JSON.parse(rawLine);
+              const token = isSse
+                ? parsed?.choices?.[0]?.delta?.content || ""
+                : parsed?.message?.content || "";
+              if (token) {
+                const { content, reasoning } = consumeThinkTaggedText(thinkParser, token);
+                if (content && !looksLikeLeakedInternalOutput(content)) {
+                  res.write(`data: ${JSON.stringify({ token: content })}\n\n`);
+                  fullReply += content;
+                }
+                if (reasoning) {
+                  res.write(`data: ${JSON.stringify({ reasoning })}\n\n`);
+                  fullReasoning += reasoning;
+                }
+              }
+            } catch {}
+          }
+        });
+
+        await new Promise((resolve) => {
+          providerStream.on("end", resolve);
+          providerStream.on("error", resolve);
+        });
+
+        goalExecution.result = fullReply;
+        goalExecution.status = GOAL_STATUS.COMPLETED;
+        goalExecution.updatedAt = new Date().toISOString();
+        session.activeGoalId = null;
+        writeSession(session);
+
+        finishSession(fullReply, model, fullReasoning);
+      }
+    } catch (error) {
+      console.warn(`[goal] Execution failed: ${error.message}`);
+      goalExecution.status = GOAL_STATUS.FAILED;
+      goalExecution.updatedAt = new Date().toISOString();
+      session.activeGoalId = null;
+      writeSession(session);
+
+      // Send error and fallback to normal response
+      res.write(`data: ${JSON.stringify({ goal: { id: goalExecution.id, status: "failed", error: error.message } })}\n\n`);
+      finishSession(`Goal execution failed: ${error.message}. Falling back to normal response.`, model);
+    }
+    return;
+  }
+
+  // --- Normal Flow (no goal) ---
   // Only redirect for surface-mode routing decisions (not tool results)
   if (directReply && !toolContext) {
     finishSession(directReply, model);
