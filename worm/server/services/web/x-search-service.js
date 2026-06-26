@@ -18,12 +18,33 @@ async function xSearch(query, options = {}) {
   const fallbackProviders = Array.isArray(options.fallbackProviders) ? options.fallbackProviders.filter(Boolean) : [];
   const mergeAcrossProviders = Boolean(options.mergeAcrossProviders);
 
+  // Fast path: when merging, fire all providers in parallel for lower latency
+  if (mergeAcrossProviders) {
+    const allProviders = [...primaryProviders, ...fallbackProviders];
+    const settled = await Promise.allSettled(allProviders.map((provider) =>
+      runProvider(provider, query, options).catch(() => null)
+    ));
+    const allPayloads = settled
+      .filter((r) => r.status === "fulfilled" && r.value)
+      .map((r) => r.value);
+    const primaryPayloads = allPayloads.filter((p) => primaryProviders.some((prov) => prov.id === p.providerId));
+    const combined = mergePayloads(allPayloads);
+    return {
+      ok: combined.results.length > 0,
+      query,
+      tier: primaryPayloads.some((payload) => payload.results.length) ? "primary" : "fallback",
+      payload: combined,
+      providerIds: allPayloads.map((payload) => payload.providerId)
+    };
+  }
+
+  // Sequential path with early return (priority order matters)
   const primaryPayloads = [];
   for (const provider of primaryProviders) {
     const payload = await runProvider(provider, query, options).catch(() => null);
     if (!payload) continue;
     primaryPayloads.push(payload);
-    if (!mergeAcrossProviders && payload.results.length) {
+    if (payload.results.length) {
       return { ok: true, query, tier: 'primary', payload, providerIds: [provider.id] };
     }
   }
@@ -33,20 +54,9 @@ async function xSearch(query, options = {}) {
     const payload = await runProvider(provider, query, options).catch(() => null);
     if (!payload) continue;
     fallbackPayloads.push(payload);
-    if (!mergeAcrossProviders && payload.results.length && !primaryPayloads.some((item) => item.results.length)) {
+    if (payload.results.length && !primaryPayloads.some((item) => item.results.length)) {
       return { ok: true, query, tier: 'fallback', payload, providerIds: [provider.id] };
     }
-  }
-
-  if (mergeAcrossProviders) {
-    const combined = mergePayloads([...primaryPayloads, ...fallbackPayloads]);
-    return {
-      ok: combined.results.length > 0,
-      query,
-      tier: primaryPayloads.some((payload) => payload.results.length) ? 'primary' : 'fallback',
-      payload: combined,
-      providerIds: [...primaryPayloads, ...fallbackPayloads].map((payload) => payload.providerId)
-    };
   }
 
   if (primaryPayloads.some((payload) => payload.results.length)) {

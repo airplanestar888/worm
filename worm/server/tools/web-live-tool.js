@@ -3760,8 +3760,8 @@ async function runSingleWebLiveLookup(message, options = {}) {
   const PARALLEL_BATCH_SIZE = 3;
 
   async function executeQuery(query) {
-    const xSearchResponse = (xPrimaryProviders.length || xFallbackProviders.length)
-      ? await xSearch(query, {
+    const xSearchPromise = (xPrimaryProviders.length || xFallbackProviders.length)
+      ? xSearch(query, {
           primaryProviders: xPrimaryProviders,
           fallbackProviders: xFallbackProviders,
           cacheTtlMs: 15 * 60 * 1000,
@@ -3770,9 +3770,9 @@ async function runSingleWebLiveLookup(message, options = {}) {
           console.warn(`[web-live] xSearch failed for "${query}": ${err?.message || err}`);
           return null;
         })
-      : null;
+      : Promise.resolve(null);
 
-    const searchResponse = await searchWeb(query, {
+    const searchPromise = searchWeb(query, {
       primaryProviders,
       fallbackProviders,
       cacheTtlMs: 15 * 60 * 1000,
@@ -3781,6 +3781,8 @@ async function runSingleWebLiveLookup(message, options = {}) {
       console.warn(`[web-live] searchWeb failed for "${query}": ${err?.message || err}`);
       return null;
     });
+
+    const [xSearchResponse, searchResponse] = await Promise.all([xSearchPromise, searchPromise]);
 
     const payloads = [xSearchResponse?.payload, searchResponse?.payload].filter((payload) => payload?.results?.length);
     const categoryPayload = payloads.length
@@ -3840,15 +3842,25 @@ async function runMultiOfficeWebLiveLookup(message, options = {}) {
     return runSingleWebLiveLookup(message, options);
   }
 
+  // Fire all role lookups in parallel — each role is independent
+  const settled = await Promise.allSettled(roles.map((role) => {
+    const subQuery = `${role.canonical} ${subject}`.trim();
+    return runSingleWebLiveLookup(subQuery, options).then((result) => ({
+      role: role.canonical,
+      result
+    }));
+  }));
+
   const replies = [];
   const summaries = [];
   const missingRoles = [];
-  for (const role of roles) {
-    const subQuery = `${role.canonical} ${subject}`.trim();
-    const result = await runSingleWebLiveLookup(subQuery, options);
+
+  for (const entry of settled) {
+    if (entry.status !== "fulfilled") continue;
+    const { role, result } = entry.value;
     summaries.push(result.summary);
     if (!result.directReply || /belum cukup jelas/i.test(result.directReply)) {
-      missingRoles.push(role.canonical);
+      missingRoles.push(role);
       continue;
     }
     replies.push(stripReplySource(result.directReply));
