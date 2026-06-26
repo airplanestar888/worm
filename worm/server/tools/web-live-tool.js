@@ -505,7 +505,12 @@ const NON_TICKER_WORDS = new Set([
   "going", "comes", "doing", "says", "said",
   "today", "right", "still", "never",
   "hello", "thanks", "thank", "please",
-  "harga", "saham", "stock", "ticker", "index"
+  "harga", "saham", "stock", "ticker", "index",
+  // Common acronyms that are NOT stock tickers
+  "asean", "gdp", "pdb", "imf", "oecd", "g20", "g7",
+  "eu", "usa", "uk", "uae", "ussr", "nato", "who",
+  "unicef", "unesco", "fifa", "nba", "f1",
+  "compare", "bandingkan", "peringkat", "ranking"
 ]);
 
 function isStockQuery(message) {
@@ -598,6 +603,7 @@ function detectLiveIntent(message) {
   const hasHistoricalCryptoIntent = isHistoricalCryptoPriceQuery(message);
   const queryKind = detectQueryKind(message);
   const hasNewsStyleIntent = ["sports", "technology_news", "economy_news", "general_news"].includes(queryKind);
+  const hasComparisonIntent = queryKind === "comparison";
 
   const shouldLookup = Boolean(
     hasHistoricalCryptoIntent
@@ -608,6 +614,7 @@ function detectLiveIntent(message) {
     || hasStockIntent
     || hasOfficeIntent
     || hasPersonRelationIntent
+    || hasComparisonIntent
     || (hasCountIntent && hasAdminEntity)
     || (hasTemporalIntent && (hasDataIntent || hasLinkIntent || hasEntity || hasSportsEntity || hasCommodity || hasVehicle || hasAdminEntity))
     || (hasDataIntent && hasCommodity)
@@ -1644,6 +1651,11 @@ function detectQueryKind(message) {
     || /\b(olahraga|sports?|bola|sepak bola|liga|nba|motogp|f1|badminton|bulu tangkis|pertandingan|match|fixture|jadwal|skor|score|klasemen)\b/.test(text)) {
     return "sports";
   }
+  // Comparison keywords (high priority — must come before news checks)
+  // These are explicit comparison signals that override news classification
+  if (/\b(compare|comparison|bandingkan|perbandingan|versus|vs\.?|ranking|peringkat)\b/.test(text)) {
+    return "comparison";
+  }
   if (/\b(teknologi|technology|tech|ai|openai|chatgpt|gadget|iphone|android|startup|server|cloud|cyber)\b/.test(text)) {
     return "technology_news";
   }
@@ -1653,9 +1665,8 @@ function detectQueryKind(message) {
   if (/\b(news|berita|headline|update|terbaru|terkini)\b/.test(text)) {
     return "general_news";
   }
-  // Comparison queries: "compare X and Y", "X vs Y", "bandingkan X dan Y", GDP/economic stats
-  if (/\b(compare|comparison|bandingkan|perbandingan|versus|vs\.?|ranking|peringkat)\b/.test(text)
-    || /\b(gdp|pdb|inflation|inflasi|unemployment|population|populasi|economic|ekonomi)\b/.test(text)) {
+  // Economic-stat keywords (lower priority — only if no news keywords matched)
+  if (/\b(gdp|pdb|inflation|unemployment|population|populasi)\b/.test(text)) {
     return "comparison";
   }
   return "price";
