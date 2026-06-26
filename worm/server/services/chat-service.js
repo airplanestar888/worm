@@ -317,7 +317,11 @@ function buildDeepSurfInstruction(surfaceMode) {
         "If the search results are weak, conflicting, or unrelated, say that the current data is not clear and avoid inventing numbers or names.",
         "Do not mention Google News, Google RSS, or internal query providers in the final answer.",
         "Only include a source line if the evidence clearly names a concrete publisher, official source, or market source.",
-        "Write the final answer naturally and directly, not like an internal report."
+        "Write the final answer naturally and directly, not like an internal report.",
+        "For comparison or ranking queries (GDP, population, economic stats), present results in a markdown table with specific numbers from the evidence.",
+        "Never reply with 'data tidak spesifik' — instead, state what IS known from the evidence and note any gaps explicitly.",
+        "Normalize units for fair comparison (all in USD, EUR, etc.) and cite the year of the data.",
+        "NEVER ask the user 'do you want me to search again?' or 'should I continue searching?' — just provide the best available answer or state what's missing."
       ].join("\n")
     : "";
 }

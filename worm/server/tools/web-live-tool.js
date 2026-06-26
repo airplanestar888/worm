@@ -169,7 +169,22 @@ const LIVE_DATA_KEYWORDS = [
   "cuaca",
   "score",
   "skor",
-  "status"
+  "status",
+  "gdp",
+  "pdb",
+  "inflation",
+  "inflasi",
+  "unemployment",
+  "population",
+  "comparison",
+  "compare",
+  "bandingkan",
+  "perbandingan",
+  "ranking",
+  "peringkat",
+  "statistic",
+  "statistik",
+  "data"
 ];
 
 const LIVE_LINK_KEYWORDS = [
@@ -1287,6 +1302,11 @@ function buildSearchQuery(message) {
     return queryText;
   }
 
+  // Comparison queries — generate specific, data-rich search terms
+  if (queryKind === "comparison") {
+    return buildComparisonSearchQuery(message, queryText);
+  }
+
   // Stock questions
   if (queryKind === "stock") {
     return queryText;
@@ -1326,6 +1346,78 @@ function buildSearchQuery(message) {
   return queryText;
 }
 
+// Build a specific search query for comparison/economic-stat queries.
+// Transforms vague "Compare 3 nations GDP in EUROPE" into actionable search terms.
+function buildComparisonSearchQuery(message, fallback) {
+  const text = normalizeSearchText(message).toLowerCase();
+
+  // Extract the metric being compared (GDP, inflation, population, etc.)
+  const metricMatch = text.match(/\b(gdp|pdb|inflation|inflasi|unemployment|pengangguran|population|populasi|gini|hdi|ppp|debt|utang|trade balance|neraca perdagangan)\b/i);
+  const metric = metricMatch ? metricMatch[1] : "";
+
+  // Extract explicit entities (country names, regions)
+  const entities = extractComparisonEntities(message);
+
+  // Use latest available year (2024) — current year data doesn't exist yet
+  const yearMatch = text.match(/\b(20\d{2})\b/);
+  const year = yearMatch ? yearMatch[1] : "2024";
+
+  if (entities.length >= 2) {
+    // Explicit entities: "Germany France Italy GDP" → specific per-country query
+    return `${entities.join(" ")} ${metric} ${year}`.trim();
+  }
+
+  if (metric) {
+    // Metric known but entities vague: "top European countries by GDP"
+    const region = extractRegionFromComparison(message);
+    return `top ${region} ${metric} ${year}`.trim();
+  }
+
+  // Fallback: keep it short and focused
+  return `${fallback} ${year} comparison data`.trim();
+}
+
+function extractComparisonEntities(message) {
+  const text = normalizeSearchText(message);
+
+  // Common country names (English + Indonesian)
+  const countryPatterns = [
+    "germany", "jerman", "france", "prancis", "italy", "italia",
+    "united kingdom", "inggris", "uk", "spain", "spanyol", "poland", "polandia",
+    "netherlands", "belanda", "switzerland", "swiss", "swedia", "sweden",
+    "norway", "norwegia", "denmark", "denmark", "finland", "finlandia",
+    "austria", "austria", "belgium", "belgia", "portugal", "portugal",
+    "greece", "yunani", "ireland", "irlandia", "czech", "republik ceko",
+    "romania", "romania", "hungary", "hungaria",
+    "united states", "amerika", "usa", "china", "tiongkok", "jepang", "japan",
+    "india", "india", "brazil", "brasil", "kanada", "canada", "australia", "australia",
+    "korea", "korea", "russia", "rusia", "mexico", "meksiko", "turkey", "turki",
+    "indonesia", "indonesia", "thailand", "thailandia", "vietnam", "vietnam",
+    "malaysia", "malaysia", "singapore", "singapura", "philippines", "filipina"
+  ];
+
+  const found = [];
+  for (const country of countryPatterns) {
+    const regex = new RegExp(`\\b${country}\\b`, "i");
+    if (regex.test(text)) {
+      found.push(country);
+    }
+  }
+  return [...new Set(found)];
+}
+
+function extractRegionFromComparison(message) {
+  const text = normalizeSearchText(message).toLowerCase();
+  if (/\b(eropa|europe|european)\b/.test(text)) return "European countries by";
+  if (/\b(asia|asian|asean)\b/.test(text)) return "Asian countries by";
+  if (/\b(afrika|africa|african)\b/.test(text)) return "African countries by";
+  if (/\b(amerika|americas?)\b/.test(text)) return "American countries by";
+  if (/\b(middle east|timur tengah)\b/.test(text)) return "Middle East countries by";
+  if (/\b(g20)\b/.test(text)) return "G20 countries by";
+  if (/\b(oecd)\b/.test(text)) return "OECD countries by";
+  return "countries by";
+}
+
 function buildFallbackSearchQuery(message, queryKind) {
   const normalized = normalizeSearchText(message);
   const historicalContext = buildHistoricalDateContext(message);
@@ -1358,6 +1450,11 @@ function buildFallbackSearchQuery(message, queryKind) {
   // News
   if (["technology_news", "economy_news", "general_news"].includes(queryKind)) {
     return `${normalized} latest`;
+  }
+
+  // Comparison
+  if (queryKind === "comparison") {
+    return buildComparisonSearchQuery(message, normalized);
   }
 
   // Stock
@@ -1556,6 +1653,11 @@ function detectQueryKind(message) {
   if (/\b(news|berita|headline|update|terbaru|terkini)\b/.test(text)) {
     return "general_news";
   }
+  // Comparison queries: "compare X and Y", "X vs Y", "bandingkan X dan Y", GDP/economic stats
+  if (/\b(compare|comparison|bandingkan|perbandingan|versus|vs\.?|ranking|peringkat)\b/.test(text)
+    || /\b(gdp|pdb|inflation|inflasi|unemployment|population|populasi|economic|ekonomi)\b/.test(text)) {
+    return "comparison";
+  }
   return "price";
 }
 
@@ -1570,7 +1672,7 @@ function classifyLiveCategory(message = "", queryKind = classifyLiveIntent(messa
     const validHints = [
       "crypto_price", "crypto_price_historical", "gold_price", "staple_price",
       "forex_price", "general_price", "stock", "technology_news", "sports_news",
-      "economy_news", "general_news", "office", "person_relation", "count"
+      "economy_news", "general_news", "office", "person_relation", "count", "comparison"
     ];
     if (validHints.includes(hint)) return hint;
   }
@@ -1583,6 +1685,7 @@ function classifyLiveCategory(message = "", queryKind = classifyLiveIntent(messa
   if (queryKind === "technology_news") return "technology_news";
   if (queryKind === "economy_news") return "economy_news";
   if (queryKind === "general_news") return "general_news";
+  if (queryKind === "comparison") return "comparison";
 
   if (queryKind === "price") {
     if (isHistoricalCryptoPriceQuery(message)) return "crypto_price_historical";
